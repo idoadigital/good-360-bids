@@ -1,0 +1,44 @@
+{
+  "_comment": "Template. Real runtime values are resolved from .env. Do NOT commit a filled copy.",
+  "name": "Reviving Homes Foundation",
+  "contact_name": "Marcus marchman",
+  "contact_email": "revivinghomes886@gmail.com",
+  "contact_phone": "",
+  "good360_email": "${GOOD360_REVIVING_HOMES_EMAIL}",
+  "good360_password": "${GOOD360_REVIVING_HOMES_PASSWORD}",
+  "good360_org_id": "",
+  "warehouse": {
+    "name": "Reviving Homes Foundation",
+    "address1": "1633 old hwy 41",
+    "city": "Marietta",
+    "state": "Ga",
+    "zip": "30062"
+  },
+  "has_dock": true,
+  "telegram_group_id": "${TELEGRAM_GROUP_REVIVING_HOMES}",
+  "categories": [
+    "amazon_new_unsorted",
+    "amazon_variety",
+    "amazon_assorted_houseware"
+  ],
+  "max_price": 6400,
+  "auto_buy": true,
+  "status": "active",
+  "checkout_answers": {
+    "people_helped": "200",
+    "distribution_method": "Thru outreach",
+    "dock_pallet": "Yes, we have a dock"
+  },
+  "payment": {
+    "card_name": "${CARD_REVIVING_HOMES_NAME}",
+    "card_number": "${CARD_REVIVING_HOMES_NUMBER}",
+    "card_expiry": "${CARD_REVIVING_HOMES_EXPIRY}",
+    "card_cvv": "${CARD_REVIVING_HOMES_CVV}",
+    "card_type": "${CARD_REVIVING_HOMES_TYPE}"
+  },
+  "auto_buy_targets": [
+    "Amazon New Unsorted Truckload",
+    "Amazon Variety Truckload",
+    "Amazon Assorted Houseware Truckload"
+  ]
+}

@@ -1,0 +1,68 @@
+{
+  "_comment": "Template for good360_orgs_master.json. Fill secrets from .env at runtime. Do NOT commit a filled copy.",
+  "reviving_homes": {
+    "name": "Reviving Homes Foundation",
+    "good360_email": "${GOOD360_REVIVING_HOMES_EMAIL}",
+    "good360_password": "${GOOD360_REVIVING_HOMES_PASSWORD}",
+    "warehouse_address": "1633 old hwy 41, Marietta Ga 30062",
+    "has_dock": true,
+    "telegram_group": "${TELEGRAM_GROUP_REVIVING_HOMES}",
+    "auto_buy": true,
+    "auto_buy_targets": [
+      "Amazon New Unsorted Truckload",
+      "Amazon Variety Truckload",
+      "Amazon Assorted Houseware Truckload"
+    ],
+    "max_price": 6400,
+    "card": {
+      "name": "${CARD_REVIVING_HOMES_NAME}",
+      "number": "${CARD_REVIVING_HOMES_NUMBER}",
+      "expiry": "${CARD_REVIVING_HOMES_EXPIRY}",
+      "cvv": "${CARD_REVIVING_HOMES_CVV}",
+      "type": "${CARD_REVIVING_HOMES_TYPE}"
+    },
+    "checkout_answers": {
+      "people_helped": "200",
+      "distribution_method": "Thru outreach",
+      "dock_pallet": "Yes, we have a dock"
+    },
+    "email_alerts": ["revivinghomes886@gmail.com"],
+    "paused": false,
+    "cooldown_active": false
+  },
+  "hope4humanity": {
+    "name": "Hope 4 Humanity",
+    "good360_email": "${GOOD360_HOPE4HUMANITY_EMAIL}",
+    "good360_password": "${GOOD360_HOPE4HUMANITY_PASSWORD}",
+    "warehouse_address": "1025 Progress Circle, Lawrenceville GA 30043",
+    "has_dock": true,
+    "telegram_group": "${TELEGRAM_GROUP_HOPE4HUMANITY}",
+    "auto_buy": true,
+    "auto_buy_targets": [
+      "Amazon New Unsorted Truckload",
+      "Amazon Variety Truckload",
+      "Amazon Assorted Houseware Truckload"
+    ],
+    "max_price": 6400,
+    "card": {
+      "name": "${CARD_HOPE4HUMANITY_NAME}",
+      "number": "${CARD_HOPE4HUMANITY_NUMBER}",
+      "expiry": "${CARD_HOPE4HUMANITY_EXPIRY}",
+      "cvv": "${CARD_HOPE4HUMANITY_CVV}",
+      "type": "${CARD_HOPE4HUMANITY_TYPE}"
+    },
+    "checkout_answers": {
+      "people_helped": "300",
+      "distribution_method": "Help the homeless and all those in need",
+      "warehouse_address": "1025 Progress Circle Lawrenceville, Ga 30043",
+      "dock_pallet": "first_option"
+    },
+    "email_alerts": [
+      "berneitha@hope4humanity.us",
+      "sdibao@gmail.com"
+    ],
+    "paused": true,
+    "cooldown_active": true,
+    "cooldown_until": "2026-04-01"
+  }
+}

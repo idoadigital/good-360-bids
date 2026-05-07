@@ -1,0 +1,69 @@
+# docker-compose for good360-monitor.
+# Each concern runs as its own always-restarting service so a crash in one
+# doesn't take down the others (another April 13 postmortem lesson).
+
+services:
+  monitor:
+    build: .
+    image: good360-monitor:local
+    restart: always
+    command: python good360_monitor.py
+    env_file: .env
+    volumes:
+      - workdir:/app/workdir
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+  daemon:
+    image: good360-monitor:local
+    restart: always
+    command: python good360_daemon.py
+    env_file: .env
+    volumes:
+      - workdir:/app/workdir
+    ports:
+      - "5002:5002"
+    depends_on: [monitor]
+
+  watchdog:
+    image: good360-monitor:local
+    restart: always
+    command: python good360_watchdog.py
+    env_file: .env
+    volumes:
+      - workdir:/app/workdir
+
+  telegram-bot:
+    image: good360-monitor:local
+    restart: always
+    command: python good360_telegram_bot.py
+    env_file: .env
+    volumes:
+      - workdir:/app/workdir
+
+  missioncontrol:
+    image: good360-monitor:local
+    restart: always
+    command: python missioncontrol/server_v2.py
+    env_file: .env
+    volumes:
+      - workdir:/app/workdir
+    ports:
+      - "5001:5001"
+
+  intake:
+    image: good360-monitor:local
+    restart: always
+    command: python intake_form/server.py
+    env_file: .env
+    volumes:
+      - workdir:/app/workdir
+    ports:
+      - "5000:5000"
+
+volumes:
+  workdir:

@@ -1,0 +1,29 @@
+# Deploy this ON A DIFFERENT HOST from the main stack.
+# Deadman's whole purpose is to survive the failure of the host it's watching.
+# Running it alongside main is theater — don't do it.
+#
+# Usage on the probe host:
+#   HEARTBEAT_URL=https://main-host/api/heartbeat \
+#   TELEGRAM_BOT_TOKEN=... \
+#   TELEGRAM_OPERATOR_CHAT_ID=... \
+#   docker compose -f docker-compose.deadman.yml up -d
+
+services:
+  deadman:
+    build: .
+    image: good360-monitor:local
+    restart: always
+    # Run the probe every 5 min in a simple loop — no cron dependency.
+    command: >
+      sh -c 'while true; do python /app/deadman_switch.py; sleep 300; done'
+    environment:
+      - HEARTBEAT_URL=${HEARTBEAT_URL}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_OPERATOR_CHAT_ID=${TELEGRAM_OPERATOR_CHAT_ID}
+      - DEADMAN_MAX_STALE_MINUTES=10
+      - DEADMAN_STATE=/state/deadman_state.json
+    volumes:
+      - deadman_state:/state
+
+volumes:
+  deadman_state:

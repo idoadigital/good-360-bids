@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest ruff pip-audit
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Pytest
+        # playwright not exercised here — healthcheck's playwright probe runs
+        # only at container start.
+        run: pytest -x
+
+      - name: pip-audit (dep vulnerability scan)
+        run: pip-audit --strict -r requirements.txt || true
+        # non-blocking: surface advisories without failing the build.
+        # Flip to `--strict` without `|| true` once the baseline is clean.
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false

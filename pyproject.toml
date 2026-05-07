@@ -1,0 +1,43 @@
+[project]
+name = "good360-monitor"
+version = "4.1.0"
+description = "Good360 Amazon Truckload monitor/auto-buy (hardened)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra -q --strict-markers"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pycodestyle + pyflakes
+    "I",             # isort
+    "B",             # flake8-bugbear
+    "UP",            # pyupgrade
+    "S",             # bandit (security)
+]
+ignore = [
+    "E501",   # line length handled by formatter
+    "S101",   # assert used — fine in tests
+    "S603",   # subprocess without shell=True — we need subprocess
+    "S607",   # partial paths — pragmatic
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "E402"]
+# Legacy code: keep security/style warnings off for now. These files need a
+# proper refactor pass (Phase 3c) — blocking CI on them would stall everything.
+"good360_autobuy.py"       = ["E402", "E701", "E702", "E722", "S110", "S112", "S603", "F841", "B007", "E741"]
+"good360_monitor.py"       = ["E402", "E701", "E702", "E722", "S110", "S112", "S310", "S603", "F841", "B007"]
+"good360_daemon.py"        = ["E402", "E701", "E702", "E722", "S104", "S110", "F841", "B007"]
+"good360_watchdog.py"      = ["E722", "S110"]
+"good360_telegram_bot.py"  = ["E722", "S110", "F841"]
+"good360_report.py"        = ["E722", "S110"]
+"good360_roster/*"         = ["E402", "E701", "E702", "E722", "S110", "S112", "S603", "S608", "S104", "F841", "B007", "B905", "E741", "UP031", "I001"]
+"missioncontrol/*"         = ["E402", "E701", "E702", "E722", "E741", "S104", "S110", "S603", "F841"]
+"intake_form/*"            = ["E402", "E722", "S110", "S104", "F841", "W293"]

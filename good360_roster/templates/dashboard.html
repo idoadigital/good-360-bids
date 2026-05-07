@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>E-Comsetter Good360 Roster System</title>
+<style>
+:root {
+  --bg-primary: #0f1117;
+  --bg-secondary: #1a1d27;
+  --bg-card: #1e2130;
+  --bg-card-hover: #252840;
+  --border: #2a2d3e;
+  --text-primary: #e4e6f0;
+  --text-secondary: #8b8fa3;
+  --text-muted: #5c6078;
+  --accent-blue: #3b82f6;
+  --accent-blue-dim: #2563eb;
+  --accent-green: #10b981;
+  --accent-yellow: #f59e0b;
+  --accent-red: #ef4444;
+  --accent-purple: #8b5cf6;
+  --accent-cyan: #06b6d4;
+  --shadow: 0 4px 24px rgba(0,0,0,0.3);
+  --radius: 12px;
+}
+
+* { margin:0; padding:0; box-sizing:border-box; }
+
+body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--bg-primary); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* Header */
+.header {
+  background: linear-gradient(135deg, #0f1117 0%, #1a1d40 100%);
+  border-bottom: 1px solid var(--border);
+  padding: 16px 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  backdrop-filter: blur(10px);
+}
+
+.header-left { display: flex; align-items: center; gap: 16px; }
+
+.logo {
+  width: 42px; height: 42px;
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+  border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: 18px; color: #fff;
+  box-shadow: 0 2px 12px rgba(59,130,246,0.3);
+}
+
+.brand h1 {
+  font-size: 18px; font-weight: 700; color: var(--text-primary);
+  letter-spacing: -0.3px;
+}
+.brand .subtitle {
+  font-size: 12px; color: var(--text-secondary); font-weight: 400;
+}
+
+.header-right { display: flex; align-items: center; gap: 20px; }
+
+.clock {
+  font-size: 13px; color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.status-pill {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 14px; border-radius: 20px;
+  font-size: 12px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.status-pill.healthy { background: rgba(16,185,129,0.15); color: var(--accent-green); }
+.status-pill.warning { background: rgba(245,158,11,0.15); color: var(--accent-yellow); }
+.status-pill.critical { background: rgba(239,68,68,0.15); color: var(--accent-red); }
+.status-pill .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  animation: pulse 2s infinite;
+}
+.status-pill.healthy .dot { background: var(--accent-green); }
+.status-pill.warning .dot { background: var(--accent-yellow); }
+.status-pill.critical .dot { background: var(--accent-red); }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.last-run {
+  font-size: 11px; color: var(--text-muted);
+  text-align: right;
+}
+
+.refresh-indicator {
+  font-size: 11px; color: var(--text-muted);
+  display: flex; align-items: center; gap: 4px;
+}
+.refresh-indicator .spinner {
+  width: 12px; height: 12px; border: 2px solid var(--border);
+  border-top: 2px solid var(--accent-blue);
+  border-radius: 50%; display: none;
+}
+.refresh-indicator.loading .spinner {
+  display: block;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Main Container */
+.container { max-width: 1600px; margin: 0 auto; padding: 24px; }
+
+/* Stats Cards */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.stat-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  transition: all 0.2s;
+}
+.stat-card:hover {
+  background: var(--bg-card-hover);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow);
+}
+.stat-card .stat-icon { font-size: 28px; margin-bottom: 8px; }
+.stat-card .stat-value {
+  font-size: 32px; font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.stat-card .stat-label {
+  font-size: 12px; color: var(--text-secondary);
+  text-transform: uppercase; letter-spacing: 0.5px;
+  margin-top: 4px;
+}
+.stat-card .stat-sub {
+  font-size: 11px; color: var(--text-muted); margin-top: 4px;
+}
+
+.stat-card.blue .stat-value { color: var(--accent-blue); }
+.stat-card.green .stat-value { color: var(--accent-green); }
+.stat-card.yellow .stat-value { color: var(--accent-yellow); }
+.stat-card.purple .stat-value { color: var(--accent-purple); }
+.stat-card.cyan .stat-value { color: var(--accent-cyan); }
+.stat-card.red .stat-value { color: var(--accent-red); }
+
+/* Section */
+.section {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 24px;
+  overflow: hidden;
+}
+
+.section-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.section-header h2 {
+  font-size: 15px; font-weight: 600;
+  display: flex; align-items: center; gap: 8px;
+}
+.section-header .badge {
+  font-size: 11px; background: var(--bg-primary);
+  padding: 2px 8px; border-radius: 10px;
+  color: var(--text-secondary); font-weight: 500;
+}
+
+.section-body { padding: 0; }
+.section-body.padded { padding: 20px; }
+
+/* Tables */
+.table-wrap { overflow-x: auto; }
+table {
+  width: 100%; border-collapse: collapse;
+  font-size: 13px;
+}
+thead th {
+  background: var(--bg-primary);
+  padding: 10px 14px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+  position: sticky; top: 0;
+}
+tbody td {
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  vertical-align: middle;
+}
+tbody tr:hover { background: var(--bg-card-hover); }
+
+/* Badges */
+.badge-status {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 10px; border-radius: 6px;
+  font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.3px;
+}
+.badge-status.active { background: rgba(16,185,129,0.15); color: var(--accent-green); }
+.badge-status.cooldown { background: rgba(245,158,11,0.15); color: var(--accent-yellow); }
+.badge-status.suspended { background: rgba(239,68,68,0.15); color: var(--accent-red); }
+.badge-status.pending_setup, .badge-status.pending { background: rgba(139,92,246,0.15); color: var(--accent-purple); }
+.badge-status.detected { background: rgba(6,182,212,0.15); color: var(--accent-cyan); }
+.badge-status.assigned { background: rgba(59,130,246,0.15); color: var(--accent-blue); }
+.badge-status.purchased, .badge-status.success, .badge-status.success_mastercard { background: rgba(16,185,129,0.15); color: var(--accent-green); }
+.badge-status.missed, .badge-status.unavailable { background: rgba(92,96,120,0.15); color: var(--text-muted); }
+.badge-status.failed_payment, .badge-status.failed_login, .badge-status.failed_checkout { background: rgba(239,68,68,0.15); color: var(--accent-red); }
+.badge-status.truck_gone { background: rgba(245,158,11,0.15); color: var(--accent-yellow); }
+.badge-status.in_progress, .badge-status.retrying { background: rgba(59,130,246,0.15); color: var(--accent-blue); }
+.badge-status.alerted_manual { background: rgba(139,92,246,0.15); color: var(--accent-purple); }
+.badge-status.skipped_excluded { background: rgba(92,96,120,0.15); color: var(--text-muted); }
+
+/* Severity */
+.severity-info { color: var(--accent-blue); }
+.severity-warning { color: var(--accent-yellow); }
+.severity-error { color: var(--accent-red); }
+.severity-critical { color: var(--accent-red); font-weight: 700; }
+
+/* Config table */
+.config-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1px; background: var(--border);
+}
+.config-item {
+  background: var(--bg-card);
+  padding: 12px 16px;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.config-item .key {
+  font-size: 12px; color: var(--text-secondary);
+  font-family: "SF Mono", "Fira Code", monospace;
+}
+.config-item .val {
+  font-size: 13px; font-weight: 600; color: var(--accent-cyan);
+  font-family: "SF Mono", "Fira Code", monospace;
+}
+
+/* Empty state */
+.empty-state {
+  padding: 40px; text-align: center; color: var(--text-muted);
+}
+.empty-state .icon { font-size: 40px; margin-bottom: 12px; }
+.empty-state .msg { font-size: 14px; }
+
+/* Two col layout */
+.grid-2 {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 24px;
+}
+@media (max-width: 1024px) {
+  .grid-2 { grid-template-columns: 1fr; }
+}
+@media (max-width: 768px) {
+  .header { flex-direction: column; gap: 12px; padding: 12px 16px; }
+  .container { padding: 12px; }
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* Monitor dot */
+.mon-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  display: inline-block; margin-right: 6px;
+}
+.mon-dot.avail { background: var(--accent-green); }
+.mon-dot.none { background: var(--text-muted); }
+
+/* Toggle */
+.toggle-on { color: var(--accent-green); }
+.toggle-off { color: var(--text-muted); }
+
+/* Tabs */
+.tabs {
+  display: flex; gap: 0; border-bottom: 1px solid var(--border);
+  padding: 0 16px;
+}
+.tab {
+  padding: 10px 16px; cursor: pointer;
+  font-size: 12px; font-weight: 600;
+  color: var(--text-muted); border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+}
+.tab:hover { color: var(--text-secondary); }
+.tab.active {
+  color: var(--accent-blue); border-bottom-color: var(--accent-blue);
+}
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* Health bar */
+.health-bar {
+  width: 100%; height: 6px; background: var(--bg-primary);
+  border-radius: 3px; overflow: hidden; margin-top: 6px;
+}
+.health-bar-fill {
+  height: 100%; border-radius: 3px;
+  transition: width 0.5s ease;
+}
+
+/* Truncate */
+.truncate {
+  max-width: 250px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Footer */
+.footer {
+  text-align: center; padding: 24px;
+  color: var(--text-muted); font-size: 12px;
+  border-top: 1px solid var(--border);
+  margin-top: 16px;
+}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-left">
+    <div class="logo">EC</div>
+    <div class="brand">
+      <h1>E-Comsetter</h1>
+      <div class="subtitle">Good360 Roster System Dashboard</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="last-run">
+      <div>Last Monitor Run</div>
+      <div id="lastRun" style="font-weight:600;color:var(--text-primary)">—</div>
+    </div>
+    <div id="systemStatus" class="status-pill healthy">
+      <span class="dot"></span>
+      <span id="statusText">Loading...</span>
+    </div>
+    <div class="clock" id="clock">—</div>
+    <div class="refresh-indicator" id="refreshInd">
+      <div class="spinner"></div>
+      <span id="refreshText">Auto-refresh: 30s</span>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- Stats Cards -->
+  <div class="stats-grid" id="statsGrid">
+    <div class="stat-card blue">
+      <div class="stat-icon">🏢</div>
+      <div class="stat-value" id="statOrgs">—</div>
+      <div class="stat-label">Active Organizations</div>
+      <div class="stat-sub" id="statOrgsTotal"></div>
+    </div>
+    <div class="stat-card cyan">
+      <div class="stat-icon">🚚</div>
+      <div class="stat-value" id="statTrucks">—</div>
+      <div class="stat-label">Trucks Detected</div>
+      <div class="stat-sub" id="statTrucksSub"></div>
+    </div>
+    <div class="stat-card green">
+      <div class="stat-icon">✅</div>
+      <div class="stat-value" id="statPurchases">—</div>
+      <div class="stat-label">Successful Purchases</div>
+      <div class="stat-sub" id="statPurchasesSub"></div>
+    </div>
+    <div class="stat-card purple">
+      <div class="stat-icon">📊</div>
+      <div class="stat-value" id="statHealth">—</div>
+      <div class="stat-label">System Health</div>
+      <div class="health-bar"><div class="health-bar-fill" id="healthBar"></div></div>
+    </div>
+  </div>
+
+  <!-- Rotation Queue -->
+  <div class="section">
+    <div class="section-header">
+      <h2>🔄 Rotation Queue <span class="badge" id="queueCount">0 orgs</span></h2>
+    </div>
+    <div class="section-body">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th><th>Organization</th><th>Status</th><th>Last Purchase</th>
+              <th>Cooldown Until</th><th>Auto-Buy</th><th>MC Fallback</th><th>Trucks Found</th>
+            </tr>
+          </thead>
+          <tbody id="queueBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Two Column: Truck Events + Purchase Attempts -->
+  <div class="grid-2">
+
+    <!-- Truck Events -->
+    <div class="section">
+      <div class="section-header">
+        <h2>🚚 Recent Truck Events <span class="badge" id="truckCount">0</span></h2>
+      </div>
+      <div class="section-body">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Detected</th><th>Truck</th><th>Price</th><th>Location</th>
+                <th>Status</th><th>Assigned To</th>
+              </tr>
+            </thead>
+            <tbody id="truckBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Purchase Attempts -->
+    <div class="section">
+      <div class="section-header">
+        <h2>💳 Purchase Attempts <span class="badge" id="purchaseCount">0</span></h2>
+      </div>
+      <div class="section-body">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th><th>Org</th><th>Truck</th><th>Card</th>
+                <th>Status</th><th>Confirm #</th>
+              </tr>
+            </thead>
+            <tbody id="purchaseBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Monitor Activity -->
+  <div class="section">
+    <div class="section-header">
+      <h2>📡 Monitor Activity</h2>
+    </div>
+    <div class="tabs">
+      <div class="tab active" data-tab="cronTab">Cron Log</div>
+      <div class="tab" data-tab="runTab">Run Log (JSON)</div>
+    </div>
+    <div class="section-body">
+      <div id="cronTab" class="tab-content active">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Timestamp</th><th>Trucks Found</th><th>Available</th>
+                <th>Auto-Buy</th><th>Action / Result</th>
+              </tr>
+            </thead>
+            <tbody id="cronBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="runTab" class="tab-content">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th><th>Total</th><th>Available</th>
+                <th>Tracked</th><th>Alert Sent</th><th>Available Trucks</th>
+              </tr>
+            </thead>
+            <tbody id="runBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Two Column: Config + Events -->
+  <div class="grid-2">
+
+    <!-- System Config -->
+    <div class="section">
+      <div class="section-header">
+        <h2>⚙️ System Configuration <span class="badge" id="configCount">0</span></h2>
+      </div>
+      <div class="section-body">
+        <div id="configGrid" class="config-grid"></div>
+      </div>
+    </div>
+
+    <!-- System Events -->
+    <div class="section">
+      <div class="section-header">
+        <h2>📋 System Events <span class="badge" id="eventCount">0</span></h2>
+      </div>
+      <div class="section-body">
+        <div class="table-wrap" style="max-height:500px;overflow-y:auto">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th><th>Severity</th><th>Type</th><th>Message</th><th>Org</th>
+              </tr>
+            </thead>
+            <tbody id="eventBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+</div>
+
+<div class="footer">
+  © 2026 E-Comsetter &mdash; Good360 Roster System &bull; Dashboard v1.0
+</div>
+
+<script>
+const API = '';
+let refreshTimer = 30;
+let refreshInterval;
+
+// Utility
+function esc(s) { if(!s) return '';
+  const d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
+function badge(status) {
+  if(!status) return '<span class="badge-status">—</span>';
+  const label = status.replace(/_/g, ' ');
+  return `<span class="badge-status ${esc(status)}">${esc(label)}</span>`;
+}
+function fmtPrice(p) {
+  if(p === null || p === undefined) return '—';
+  return '$' + Number(p).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+}
+function fmtDate(d) {
+  if(!d) return '—';
+  return d.replace('T', ' ');
+}
+function emptyRow(cols, msg) {
+  return `<tr><td colspan="${cols}" class="empty-state"><div class="icon">📭</div><div class="msg">${msg || 'No data yet'}</div></td></tr>`;
+}
+function toggleBool(v) {
+  return v ? '<span class="toggle-on">✅ Yes</span>' : '<span class="toggle-off">❌ No</span>';
+}
+
+// Tabs
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    const parent = tab.closest('.section');
+    parent.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    parent.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    tab.classList.add('active');
+    parent.querySelector(`#${tab.dataset.tab}`).classList.add('active');
+  });
+});
+
+// Data fetchers
+async function fetchJSON(url) {
+  try { const r = await fetch(url); return await r.json(); }
+  catch(e) { console.error('Fetch error:', url, e); return null; }
+}
+
+async function loadStats() {
+  const d = await fetchJSON('/api/stats');
+  if(!d) return;
+  document.getElementById('statOrgs').textContent = d.active_orgs;
+  document.getElementById('statOrgsTotal').textContent = `${d.total_orgs} total registered`;
+  document.getElementById('statTrucks').textContent = d.total_trucks;
+  document.getElementById('statPurchases').textContent = d.successful_purchases;
+  if(d.failed_purchases > 0) {
+    document.getElementById('statPurchasesSub').textContent = `${d.failed_purchases} failed`;
+  }
+  document.getElementById('statHealth').textContent = d.health_score + '%';
+
+  const bar = document.getElementById('healthBar');
+  bar.style.width = d.health_score + '%';
+  if(d.health_score >= 80) bar.style.background = 'var(--accent-green)';
+  else if(d.health_score >= 50) bar.style.background = 'var(--accent-yellow)';
+  else bar.style.background = 'var(--accent-red)';
+
+  const sp = document.getElementById('systemStatus');
+  sp.className = 'status-pill ' + d.system_status;
+  document.getElementById('statusText').textContent = d.system_status;
+}
+
+async function loadNonprofits() {
+  const data = await fetchJSON('/api/nonprofits');
+  const tb = document.getElementById('queueBody');
+  document.getElementById('queueCount').textContent = (data ? data.length : 0) + ' orgs';
+  if(!data || data.length === 0) { tb.innerHTML = emptyRow(8, 'No organizations registered yet'); return; }
+  tb.innerHTML = data.map((r, i) => `<tr>
+    <td style="font-weight:700;color:var(--accent-blue)">${r.queue_position || (i+1)}</td>
+    <td><strong>${esc(r.org_name)}</strong><br><span style="font-size:11px;color:var(--text-muted)">${esc(r.contact_name)}</span></td>
+    <td>${badge(r.status)}</td>
+    <td>${fmtDate(r.last_purchase_date)}</td>
+    <td>${fmtDate(r.cooldown_until)}</td>
+    <td>${toggleBool(r.auto_buy_global)}</td>
+    <td>${toggleBool(r.master_card_fallback)}</td>
+    <td style="font-weight:600">${r.total_trucks_found}</td>
+  </tr>`).join('');
+}
+
+async function loadTruckEvents() {
+  const data = await fetchJSON('/api/truck-events');
+  const tb = document.getElementById('truckBody');
+  document.getElementById('truckCount').textContent = data ? data.length : 0;
+  if(!data || data.length === 0) { tb.innerHTML = emptyRow(6, 'No truck events detected yet'); return; }
+  tb.innerHTML = data.map(r => `<tr>
+    <td style="white-space:nowrap;font-size:12px">${fmtDate(r.detected_at)}</td>
+    <td class="truncate" title="${esc(r.truck_title)}">${esc(r.truck_title)}</td>
+    <td style="font-weight:600">${fmtPrice(r.truck_price)}</td>
+    <td>${esc(r.truck_location) || '—'}</td>
+    <td>${badge(r.status)}</td>
+    <td>${esc(r.assigned_org_name) || '—'}</td>
+  </tr>`).join('');
+}
+
+async function loadPurchaseAttempts() {
+  const data = await fetchJSON('/api/purchase-attempts');
+  const tb = document.getElementById('purchaseBody');
+  document.getElementById('purchaseCount').textContent = data ? data.length : 0;
+  if(!data || data.length === 0) { tb.innerHTML = emptyRow(6, 'No purchase attempts yet'); return; }
+  tb.innerHTML = data.map(r => `<tr>
+    <td style="white-space:nowrap;font-size:12px">${fmtDate(r.started_at)}</td>
+    <td>${esc(r.org_name) || '—'}</td>
+    <td class="truncate" title="${esc(r.truck_title)}">${esc(r.truck_title)}</td>
+    <td>${r.payment_card ? '*'+esc(r.payment_card) : '—'}</td>
+    <td>${badge(r.status)}</td>
+    <td style="font-family:monospace">${esc(r.confirmation_number) || '—'}</td>
+  </tr>`).join('');
+}
+
+async function loadMonitorActivity() {
+  const data = await fetchJSON('/api/monitor-activity');
+  if(!data) return;
+
+  // Last run
+  if(data.last_run) {
+    document.getElementById('lastRun').textContent = data.last_run;
+  }
+
+  // Cron runs
+  const cronTb = document.getElementById('cronBody');
+  if(!data.cron_runs || data.cron_runs.length === 0) {
+    cronTb.innerHTML = emptyRow(5, 'No cron log entries');
+  } else {
+    cronTb.innerHTML = data.cron_runs.map(r => {
+      const dotClass = r.available > 0 ? 'avail' : 'none';
+      return `<tr>
+        <td style="white-space:nowrap;font-size:12px">${esc(r.timestamp)}</td>
+        <td style="font-weight:600">${r.trucks_found}</td>
+        <td><span class="mon-dot ${dotClass}"></span>${r.available}</td>
+        <td>${r.auto_buy_active ? '<span class="toggle-on">✅ Active</span>' : '<span class="toggle-off">⚪ Off</span>'}</td>
+        <td style="font-size:12px">${esc(r.action)}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // Run log
+  const runTb = document.getElementById('runBody');
+  if(!data.run_log || data.run_log.length === 0) {
+    runTb.innerHTML = emptyRow(6, 'No run log entries');
+  } else {
+    runTb.innerHTML = data.run_log.map(r => {
+      const dotClass = r.available > 0 ? 'avail' : 'none';
+      const trucks = r.available_trucks.length > 0 ?
+        r.available_trucks.map(t => `<span style="font-size:11px;color:var(--accent-green)">• ${esc(t)}</span>`).join('<br>') : '—';
+      return `<tr>
+        <td style="white-space:nowrap;font-size:12px">${esc(r.time)}</td>
+        <td style="font-weight:600">${r.total_trucks}</td>
+        <td><span class="mon-dot ${dotClass}"></span>${r.available}</td>
+        <td>${r.tracked}</td>
+        <td>${r.alert_sent ? '<span class="toggle-on">✅ Yes</span>' : '❌ No'}</td>
+        <td>${trucks}</td>
+      </tr>`;
+    }).join('');
+  }
+}
+
+async function loadSystemConfig() {
+  const data = await fetchJSON('/api/system-config');
+  const grid = document.getElementById('configGrid');
+  document.getElementById('configCount').textContent = data ? data.length : 0;
+  if(!data || data.length === 0) {
+    grid.innerHTML = '<div class="empty-state"><div class="icon">⚙️</div><div class="msg">No configuration data</div></div>';
+    return;
+  }
+  grid.innerHTML = data.map(r =>
+    `<div class="config-item"><span class="key">${esc(r.key)}</span><span class="val">${esc(r.value)}</span></div>`
+  ).join('');
+}
+
+async function loadSystemEvents() {
+  const data = await fetchJSON('/api/system-events');
+  const tb = document.getElementById('eventBody');
+  document.getElementById('eventCount').textContent = data ? data.length : 0;
+  if(!data || data.length === 0) { tb.innerHTML = emptyRow(5, 'No system events yet'); return; }
+  tb.innerHTML = data.map(r => {
+    const sev = r.severity || 'info';
+    const sevIcons = {info:'🔵', warning:'🟡', error:'🔴', critical:'🟥'};
+    return `<tr>
+      <td style="white-space:nowrap;font-size:12px">${fmtDate(r.created_at)}</td>
+      <td class="severity-${sev}">${sevIcons[sev]||''} ${esc(sev)}</td>
+      <td style="font-family:monospace;font-size:12px">${esc(r.event_type)}</td>
+      <td style="max-width:350px">${esc(r.message)}</td>
+      <td>${esc(r.org_name) || '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function loadClock() {
+  const d = await fetchJSON('/api/time');
+  if(d) document.getElementById('clock').textContent = d.time;
+}
+
+// Master refresh
+async function refreshAll() {
+  const ind = document.getElementById('refreshInd');
+  ind.classList.add('loading');
+  try {
+    await Promise.all([
+      loadStats(), loadNonprofits(), loadTruckEvents(),
+      loadPurchaseAttempts(), loadMonitorActivity(),
+      loadSystemConfig(), loadSystemEvents(), loadClock()
+    ]);
+  } catch(e) { console.error('Refresh error:', e); }
+  ind.classList.remove('loading');
+  refreshTimer = 30;
+}
+
+// Countdown
+function startCountdown() {
+  refreshInterval = setInterval(() => {
+    refreshTimer--;
+    if(refreshTimer <= 0) {
+      refreshAll();
+    } else {
+      document.getElementById('refreshText').textContent = `Auto-refresh: ${refreshTimer}s`;
+    }
+  }, 1000);
+}
+
+// Init
+refreshAll();
+startCountdown();
+</script>
+</body>
+</html>

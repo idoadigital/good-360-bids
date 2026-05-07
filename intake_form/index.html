@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>E-Comsetter | Good360 Onboarding Portal</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#ae2f34',
+                        'primary-light': '#ff6b6b',
+                        'primary-dark': '#8c1520',
+                        surface: '#f8f9fa',
+                        'surface-container': '#edeeef',
+                        'surface-container-low': '#f3f4f5',
+                        'surface-container-lowest': '#ffffff',
+                        'on-surface': '#191c1d',
+                        'on-surface-variant': '#584140',
+                        secondary: '#5d5c74',
+                        'secondary-container': '#e2e0fc',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .primary-gradient {
+            background: linear-gradient(135deg, #ae2f34 0%, #ff6b6b 100%);
+        }
+        .glass-card {
+            background: rgba(255, 223, 158, 0.15);
+            backdrop-filter: blur(8px);
+        }
+        input:focus, select:focus, textarea:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(174, 47, 52, 0.15);
+        }
+        .suggestion-btn:hover, .suggestion-btn.active {
+            background: #ae2f34;
+            color: white;
+        }
+        /* Mobile Menu Toggle */
+        #menu-toggle { display: none; }
+        #sidebar { transition: transform 0.3s ease; }
+        #sidebar-overlay { display: none; }
+        
+        @media (max-width: 768px) {
+            #sidebar {
+                position: fixed;
+                left: 0;
+                top: 0;
+                height: 100vh;
+                width: 280px;
+                z-index: 100;
+                transform: translateX(-100%);
+            }
+            #sidebar.open {
+                transform: translateX(0);
+            }
+            #sidebar-overlay {
+                display: none;
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: rgba(0,0,0,0.5);
+                z-index: 99;
+            }
+            #sidebar-overlay.open {
+                display: block;
+            }
+            #menu-toggle {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                width: 44px;
+                height: 44px;
+                border-radius: 12px;
+                cursor: pointer;
+                background: #f3f4f5;
+            }
+            main {
+                margin-left: 0 !important;
+            }
+            header {
+                padding: 12px 16px !important;
+            }
+            .form-content {
+                padding: 16px !important;
+            }
+            section {
+                padding: 16px !important;
+            }
+            .grid-2 {
+                grid-template-columns: 1fr !important;
+            }
+            .grid-3 {
+                grid-template-columns: 1fr !important;
+            }
+            .grid-4 {
+                grid-template-columns: 1fr 1fr !important;
+            }
+            h2 {
+                font-size: 1.25rem !important;
+            }
+            .suggestion-buttons {
+                flex-wrap: wrap;
+            }
+            .suggestion-btn {
+                padding: 12px 16px !important;
+                font-size: 14px !important;
+            }
+            button[type="submit"] {
+                width: 100%;
+                padding: 16px !important;
+                font-size: 16px !important;
+            }
+            button[type="reset"] {
+                width: 100%;
+            }
+            input, select, textarea {
+                font-size: 16px !important; /* Prevents iOS zoom */
+                padding: 16px !important;
+            }
+            .fee-table {
+                font-size: 12px;
+            }
+            .fee-table th, .fee-table td {
+                padding: 10px 8px !important;
+            }
+            .consent-checkbox {
+                padding: 12px !important;
+            }
+            .final-actions {
+                flex-direction: column;
+            }
+            .final-actions > div {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body class="bg-surface font-sans text-on-surface">
+    <!-- Mobile Overlay -->
+    <div id="sidebar-overlay" onclick="toggleMenu()"></div>
+    <div class="flex min-h-screen relative">
+        <!-- Sidebar Navigation -->
+        <aside id="sidebar" class="w-64 fixed left-0 top-0 h-screen bg-white shadow-sm overflow-y-auto z-50">
+            <div class="p-6 border-b">
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 primary-gradient rounded-lg flex items-center">
+                        <span class="material-symbols-outlined text-white">inventory_2</span>
+                    </div>
+                    <div>
+                        <h1 class="font-bold text-lg">E-Comsetter</h1>
+                        <p class="text-xs text-secondary uppercase tracking-wider">Onboarding Portal</p>
+                    </div>
+                </div>
+            </div>
+            <nav class="p-4 space-y-1">
+                <a href="#organization" class="flex items-center gap-3 px-4 py-3 text-primary font-semibold border-r-4 border-primary bg-red-50 rounded-r-lg">
+                    <span class="material-symbols-outlined">domain</span>
+                    <span class="text-sm">Organization</span>
+                </a>
+                <a href="#credentials" class="flex items-center gap-3 px-4 py-3 text-secondary hover:bg-gray-50 hover:text-primary transition-all">
+                    <span class="material-symbols-outlined">vpn_key</span>
+                    <span class="text-sm">Credentials</span>
+                </a>
+                <a href="#contact" class="flex items-center gap-3 px-4 py-3 text-secondary hover:bg-gray-50 hover:text-primary transition-all">
+                    <span class="material-symbols-outlined">person</span>
+                    <span class="text-sm">Contact</span>
+                </a>
+                <a href="#warehouse" class="flex items-center gap-3 px-4 py-3 text-secondary hover:bg-gray-50 hover:text-primary transition-all">
+                    <span class="material-symbols-outlined">warehouse</span>
+                    <span class="text-sm">Warehouse</span>
+                </a>
+                <a href="#payment" class="flex items-center gap-3 px-4 py-3 text-secondary hover:bg-gray-50 hover:text-primary transition-all">
+                    <span class="material-symbols-outlined">payments</span>
+                    <span class="text-sm">Payment</span>
+                </a>
+                <a href="#checkout" class="flex items-center gap-3 px-4 py-3 text-secondary hover:bg-gray-50 hover:text-primary transition-all">
+                    <span class="material-symbols-outlined">shopping_cart</span>
+                    <span class="text-sm">Checkout</span>
+                </a>
+                <a href="#truckload" class="flex items-center gap-3 px-4 py-3 text-secondary hover:bg-gray-50 hover:text-primary transition-all">
+                    <span class="material-symbols-outlined">local_shipping</span>
+                    <span class="text-sm">Truckload</span>
+                </a>
+                <a href="#fees" class="flex items-center gap-3 px-4 py-3 text-secondary hover:bg-gray-50 hover:text-primary transition-all">
+                    <span class="material-symbols-outlined">info</span>
+                    <span class="text-sm">Fees</span>
+                </a>
+                <a href="#consent" class="flex items-center gap-3 px-4 py-3 text-secondary hover:bg-gray-50 hover:text-primary transition-all">
+                    <span class="material-symbols-outlined">verified_user</span>
+                    <span class="text-sm">Consent</span>
+                </a>
+                <a href="#signature" class="flex items-center gap-3 px-4 py-3 text-secondary hover:bg-gray-50 hover:text-primary transition-all">
+                    <span class="material-symbols-outlined">draw</span>
+                    <span class="text-sm">Signature</span>
+                </a>
+            </nav>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="ml-64 flex-1">
+            <!-- Top Header -->
+            <header class="sticky top-0 bg-white/95 backdrop-blur shadow-sm z-40 px-4 md:px-8 py-3 md:py-4 flex justify-between items-center">
+                <div class="flex items-center gap-3">
+                    <div id="menu-toggle" onclick="toggleMenu()">
+                        <span class="material-symbols-outlined">menu</span>
+                    </div>
+                <div class="flex items-center gap-4">
+                    <span class="text-xl font-bold tracking-tight text-primary">Good360 Truckload Monitoring Intake</span>
+                </div>
+                <div class="flex items-center gap-4">
+                    <div class="glass-card px-4 py-2 rounded-lg flex items-center gap-2">
+                        <span class="material-symbols-outlined text-primary">lock</span>
+                        <span class="text-xs font-semibold">256-bit SSL Secured</span>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Form Content -->
+            <form action="/api/intake-submit" method="POST" class="form-content max-w-5xl mx-auto px-4 md:px-8 py-6 md:py-12 space-y-8 md:space-y-16">
+                
+                <!-- Hero Trust Banner -->
+                <div class="glass-card rounded-xl p-6 border border-amber-200/30 flex items-center gap-6">
+                    <div class="bg-amber-100 p-3 rounded-full">
+                        <span class="material-symbols-outlined text-3xl text-amber-700">shield</span>
+                    </div>
+                    <div>
+                        <h3 class="font-bold text-lg">Secure Partner Intake</h3>
+                        <p class="text-on-surface-variant text-sm">Your data is encrypted using 256-bit SSL technology. All financial information is handled according to PCI-DSS compliance standards.</p>
+                    </div>
+                </div>
+
+                <!-- 1. Organization Information -->
+                <section id="organization" class="space-y-4 md:space-y-6">
+                    <div class="flex items-baseline justify-between border-b border-gray-200 pb-2">
+                        <h2 class="text-2xl font-bold tracking-tight">Organization Information</h2>
+                        <span class="text-xs font-bold text-primary tracking-widest uppercase">Section 01</span>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6 p-4 md:p-6 grid-2 bg-surface-container-low rounded-xl">
+                        <div class="space-y-2">
+                            <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Legal Name <span class="text-primary">*</span></label>
+                            <input name="legal_name" required class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="e.g. Hope for Humanity" type="text">
+                        </div>
+                        <div class="space-y-2">
+                            <label class="block text-xs font-bold text-secondary uppercase tracking-wider">DBA (Doing Business As)</label>
+                            <input name="dba" class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="e.g. H4H" type="text">
+                        </div>
+                        <div class="space-y-2 md:col-span-2">
+                            <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Tax ID <span class="text-secondary text-xs font-normal">(Optional)</span></label>
+                            <input name="tax_id" class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="00-0000000" type="text">
+                        </div>
+                    </div>
+                </section>
+
+                <!-- 2. Good360 Account Credentials -->
+                <section id="credentials" class="space-y-4 md:space-y-6">
+                    <div class="flex items-baseline justify-between border-b border-gray-200 pb-2">
+                        <h2 class="text-2xl font-bold tracking-tight">Good360 Account Credentials</h2>
+                        <span class="text-xs font-bold text-primary tracking-widest uppercase">Section 02</span>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-6 p-4 md:p-6 grid-3 bg-surface-container-low rounded-xl">
+                        <div class="space-y-2">
+                            <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Email <span class="text-primary">*</span></label>
+                            <input name="good360_email" required class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="admin@org.org" type="email">
+                        </div>
+                        <div class="space-y-2">
+                            <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Password <span class="text-primary">*</span></label>
+                            <input name="good360_password" required class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="••••••••" type="password">
+                        </div>
+                        <div class="space-y-2">
+                            <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Organization ID <span class="text-primary">*</span></label>
+                            <input name="good360_org_id" required class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="G360-12345" type="text">
+                        </div>
+                    </div>
+                </section>
+
+                <!-- 3. Primary Contact -->
+                <section id="contact" class="space-y-4 md:space-y-6">
+                    <div class="flex items-baseline justify-between border-b border-gray-200 pb-2">
+                        <h2 class="text-2xl font-bold tracking-tight">Primary Contact</h2>
+                        <span class="text-xs font-bold text-primary tracking-widest uppercase">Section 03</span>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6 p-4 md:p-6 grid-2 bg-surface-container-low rounded-xl">
+                        <div class="space-y-2">
+                            <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Full Name <span class="text-primary">*</span></label>
+                            <input name="contact_name" required class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="John Doe" type="text">
+                        </div>
+                        <div class="space-y-2">
+                            <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Title / Position</label>
+                            <input name="contact_title" class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="Executive Director" type="text">
+                        </div>
+                        <div class="space-y-2">
+                            <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Email <span class="text-primary">*</span></label>
+                            <input name="contact_email" required class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="john@org.org" type="email">
+                        </div>
+                        <div class="space-y-2">
+                            <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Phone <span class="text-primary">*</span></label>
+                            <input name="contact_phone" required class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="(555) 123-4567" type="tel">
+                        </div>
+                    </div>
+                </section>
+
+                <!-- 4. Warehouse / Delivery Address -->
+                <section id="warehouse" class="space-y-4 md:space-y-6">
+                    <div class="flex items-baseline justify-between border-b border-gray-200 pb-2">
+                        <h2 class="text-2xl font-bold tracking-tight">Warehouse / Delivery Address</h2>
+                        <span class="text-xs font-bold text-primary tracking-widest uppercase">Section 04</span>
+                    </div>
+                    <div class="p-6 bg-surface-container-low rounded-xl space-y-6">
+                        <div class="space-y-2">
+                            <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Street Address <span class="text-primary">*</span></label>
+                            <input name="warehouse_address" required class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="123 Main Street" type="text">
+                        </div>
+                        <div class="grid grid-cols-2 gap-3 md:gap-4 grid-4">
+                            <div class="col-span-2 space-y-2">
+                                <label class="block text-xs font-bold text-secondary uppercase tracking-wider">City <span class="text-primary">*</span></label>
+                                <input name="warehouse_city" required class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="Lawrenceville" type="text">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="block text-xs font-bold text-secondary uppercase tracking-wider">State <span class="text-primary">*</span></label>
+                                <input name="warehouse_state" required class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="GA" type="text">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="block text-xs font-bold text-secondary uppercase tracking-wider">ZIP <span class="text-primary">*</span></label>
+                                <input name="warehouse_zip" required class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="30043" type="text">
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-6 pt-2">
+                            <span class="text-xs font-bold text-secondary uppercase tracking-wider">Dock Availability?</span>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input name="has_dock" value="yes" class="text-primary" type="radio">
+                                <span class="text-sm font-medium group-hover:text-primary">Yes, we have a dock</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input name="has_dock" value="no" class="text-primary" type="radio">
+                                <span class="text-sm font-medium group-hover:text-primary">No, liftgate required</span>
+                            </label>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- 5. Payment Information -->
+                <section id="payment" class="space-y-4 md:space-y-6">
+                    <div class="flex items-baseline justify-between border-b border-gray-200 pb-2">
+                        <h2 class="text-2xl font-bold tracking-tight">Payment Information</h2>
+                        <span class="text-xs font-bold text-primary tracking-widest uppercase">Section 05</span>
+                    </div>
+                    <div class="p-6 bg-surface-container-low rounded-xl space-y-6">
+                        <div class="bg-amber-50 border border-amber-200 rounded-lg p-4 flex items-start gap-3">
+                            <span class="material-symbols-outlined text-amber-600">info</span>
+                            <p class="text-sm text-amber-800">Your card will only be charged for the truck purchase price at checkout. The E-Comsetter service fee of $500 is billed separately after successful purchase and is <strong>NOT auto-charged</strong> to this card.</p>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                            <div class="space-y-4 md:space-y-6">
+                                <div class="space-y-2">
+                                    <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Cardholder Name <span class="text-primary">*</span></label>
+                                    <input name="card_name" required class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="John Doe" type="text">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Card Number <span class="text-primary">*</span></label>
+                                    <div class="relative">
+                                        <input name="card_number" required class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="0000 0000 0000 0000" type="text">
+                                        <span class="material-symbols-outlined absolute right-4 top-1/2 -translate-y-1/2 text-gray-400">credit_card</span>
+                                    </div>
+                                </div>
+                                <div class="grid grid-cols-2 gap-4">
+                                    <div class="space-y-2">
+                                        <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Expiration <span class="text-primary">*</span></label>
+                                        <input name="card_expiry" required class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="MM/YY" type="text">
+                                    </div>
+                                    <div class="space-y-2">
+                                        <label class="block text-xs font-bold text-secondary uppercase tracking-wider">CVV <span class="text-primary">*</span></label>
+                                        <input name="card_cvv" required class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="123" type="text">
+                                    </div>
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Card Type</label>
+                                    <select name="card_type" class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm">
+                                        <option value="visa">Visa</option>
+                                        <option value="mastercard">Mastercard</option>
+                                        <option value="amex">American Express</option>
+                                        <option value="discover">Discover</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="space-y-4 md:space-y-6">
+                                <div class="flex items-center justify-between">
+                                    <label class="text-xs font-bold text-secondary uppercase tracking-wider">Billing Address</label>
+                                    <label class="flex items-center gap-2 cursor-pointer">
+                                        <input id="same_as_delivery" class="rounded text-primary w-4 h-4" type="checkbox">
+                                        <span class="text-xs font-medium text-secondary">Same as delivery</span>
+                                    </label>
+                                </div>
+                                <div class="space-y-4">
+                                    <input name="billing_address" class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="Street Address" type="text">
+                                    <div class="grid grid-cols-2 gap-4">
+                                        <input name="billing_city" class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="City" type="text">
+                                        <input name="billing_state" class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="State" type="text">
+                                    </div>
+                                    <input name="billing_zip" class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="ZIP Code" type="text">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- 6. Good360 Checkout Questions -->
+                <section id="checkout" class="space-y-4 md:space-y-6">
+                    <div class="flex items-baseline justify-between border-b border-gray-200 pb-2">
+                        <h2 class="text-2xl font-bold tracking-tight">Good360 Checkout Questions</h2>
+                        <span class="text-xs font-bold text-primary tracking-widest uppercase">Section 06</span>
+                    </div>
+                    <div class="p-6 bg-surface-container-low rounded-xl space-y-6">
+                        <div class="space-y-2">
+                            <label class="block text-xs font-bold text-secondary uppercase tracking-wider">How many people does your organization help annually? <span class="text-primary">*</span></label>
+                            <input name="people_helped" required class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="e.g. 500 families / month" type="text">
+                        </div>
+                        <div class="space-y-2">
+                            <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Primary Distribution Method <span class="text-primary">*</span></label>
+                            <textarea name="distribution_method" required rows="3" class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="Describe your distribution method (e.g. weekly food pantry, mobile distribution to homeless camps, partner agency network...)"></textarea>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- 7. Truckload Preferences -->
+                <section id="truckload" class="space-y-4 md:space-y-6">
+                    <div class="flex items-baseline justify-between border-b border-gray-200 pb-2">
+                        <h2 class="text-2xl font-bold tracking-tight">Truckload Preferences</h2>
+                        <span class="text-xs font-bold text-primary tracking-widest uppercase">Section 07</span>
+                    </div>
+                    <div class="p-6 bg-surface-container-low rounded-xl space-y-8">
+                        <div class="space-y-4">
+                            <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Requested Categories</label>
+                            <div class="grid grid-cols-2 gap-3 md:gap-4 grid-4">
+                                <label class="flex items-center gap-3 p-4 bg-white rounded-lg border border-gray-200 hover:border-primary/30 cursor-pointer transition-all">
+                                    <input name="categories" value="amazon_new_unsorted" class="rounded text-primary w-4 h-4" type="checkbox">
+                                    <span class="text-sm font-medium">New Unsorted</span>
+                                </label>
+                                <label class="flex items-center gap-3 p-4 bg-white rounded-lg border border-gray-200 hover:border-primary/30 cursor-pointer transition-all">
+                                    <input name="categories" value="amazon_variety" class="rounded text-primary w-4 h-4" type="checkbox">
+                                    <span class="text-sm font-medium">Variety</span>
+                                </label>
+                                <label class="flex items-center gap-3 p-4 bg-white rounded-lg border border-gray-200 hover:border-primary/30 cursor-pointer transition-all">
+                                    <input name="categories" value="amazon_assorted_houseware" class="rounded text-primary w-4 h-4" type="checkbox">
+                                    <span class="text-sm font-medium">Houseware</span>
+                                </label>
+                                <label class="flex items-center gap-3 p-4 bg-white rounded-lg border border-gray-200 hover:border-primary/30 cursor-pointer transition-all">
+                                    <input name="categories" value="amazon_assorted_softlines" class="rounded text-primary w-4 h-4" type="checkbox">
+                                    <span class="text-sm font-medium">Softlines</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="space-y-4">
+                            <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Maximum Price Per Truck</label>
+                            <div class="flex flex-wrap gap-3">
+                                <button type="button" onclick="setMaxPrice(4000)" class="suggestion-btn px-6 py-2 bg-white border border-gray-200 rounded-full text-sm font-bold transition-all">$4,000</button>
+                                <button type="button" onclick="setMaxPrice(5000)" class="suggestion-btn px-6 py-2 bg-white border border-gray-200 rounded-full text-sm font-bold transition-all">$5,000</button>
+                                <button type="button" onclick="setMaxPrice(6000)" class="suggestion-btn px-6 py-2 bg-white border border-gray-200 rounded-full text-sm font-bold transition-all">$6,000</button>
+                                <button type="button" onclick="setMaxPrice(6400)" class="suggestion-btn px-6 py-2 bg-white border border-gray-200 rounded-full text-sm font-bold transition-all">$6,400</button>
+                                <div class="relative flex-1 min-w-[200px]">
+                                    <span class="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 font-bold">$</span>
+                                    <input name="max_price" id="max_price_input" class="w-full bg-white border border-gray-200 rounded-lg py-3 pl-8 pr-4 text-sm transition-all placeholder:text-gray-400" placeholder="Custom Amount" type="text">
+                                </div>
+                            </div>
+                            <script>
+                                function setMaxPrice(amount) {
+                                    document.getElementById('max_price_input').value = amount.toLocaleString();
+                                    document.querySelectorAll('.suggestion-btn').forEach(btn => btn.classList.remove('active'));
+                                    event.target.classList.add('active');
+                                }
+                            </script>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- 8. Fee Disclosure -->
+                <section id="fees" class="space-y-4 md:space-y-6">
+                    <div class="flex items-baseline justify-between border-b border-gray-200 pb-2">
+                        <h2 class="text-2xl font-bold tracking-tight">Fee Disclosure</h2>
+                        <span class="text-xs font-bold text-primary tracking-widest uppercase">Section 08</span>
+                    </div>
+                    <div class="overflow-hidden bg-surface-container-low rounded-xl">
+                        <table class="w-full text-left">
+                            <thead>
+                                <tr class="bg-gray-100">
+                                    <th class="px-6 py-4 text-xs font-bold text-secondary uppercase tracking-widest">Fee Type</th>
+                                    <th class="px-6 py-4 text-xs font-bold text-secondary uppercase tracking-widest">Amount</th>
+                                    <th class="px-6 py-4 text-xs font-bold text-secondary uppercase tracking-widest">When Billed</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-200">
+                                <tr>
+                                    <td class="px-6 py-5 font-semibold">Good360 Truck Price</td>
+                                    <td class="px-6 py-5 text-primary font-bold">Varies</td>
+                                    <td class="px-6 py-5 text-sm text-on-surface-variant">Charged by Good360 at checkout</td>
+                                </tr>
+                                <tr>
+                                    <td class="px-6 py-5 font-semibold">E-Comsetter Monitoring</td>
+                                    <td class="px-6 py-5 text-green-600 font-bold">FREE</td>
+                                    <td class="px-6 py-5 text-sm text-on-surface-variant">Included with purchase</td>
+                                </tr>
+                                <tr>
+                                    <td class="px-6 py-5 font-semibold">E-Comsetter Service Fee</td>
+                                    <td class="px-6 py-5 text-primary font-bold">$500.00</td>
+                                    <td class="px-6 py-5 text-sm text-on-surface-variant">Billed separately after successful purchase (NOT auto-charged)</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                        <p class="text-sm text-blue-800">
+                            <strong>Total Cost Example:</strong> If you purchase a $3,200 truck, you pay $3,200 to Good360 + $500 E-Comsetter fee = <strong>$3,700 total</strong>. The service fee is invoiced separately and is not auto-charged to your card.
+                        </p>
+                    </div>
+                </section>
+
+                <!-- 9. Authorization & Consent -->
+                <section id="consent" class="space-y-4 md:space-y-6">
+                    <div class="flex items-baseline justify-between border-b border-gray-200 pb-2">
+                        <h2 class="text-2xl font-bold tracking-tight">Authorization & Consent</h2>
+                        <span class="text-xs font-bold text-primary tracking-widest uppercase">Section 09</span>
+                    </div>
+                    <div class="p-6 bg-surface-container-low rounded-xl space-y-6">
+                        <div class="bg-white p-6 rounded-lg text-sm text-on-surface-variant leading-relaxed border border-gray-200">
+                            <p>By checking the boxes below, I, as an authorized representative of the listed organization, hereby agree to the terms of the E-Comsetter Service Agreement. I confirm that I understand and accept the monitoring service, purchase authorization, payment terms, cooldown policy, and service limitations as described.</p>
+                        </div>
+                        <div class="space-y-4">
+                            <label class="flex items-start gap-3 group cursor-pointer">
+                                <input required class="mt-1 rounded text-primary w-4 h-4" type="checkbox">
+                                <span class="text-sm font-medium group-hover:text-primary transition-colors"><strong>Monitoring Authorization:</strong> I authorize E-Comsetter to access my Good360 account to monitor truck availability and notify me of relevant inventory.</span>
+                            </label>
+                            <label class="flex items-start gap-3 group cursor-pointer">
+                                <input required class="mt-1 rounded text-primary w-4 h-4" type="checkbox">
+                                <span class="text-sm font-medium group-hover:text-primary transition-colors"><strong>Purchase Authorization:</strong> I authorize E-Comsetter to charge my card for the truck purchase price via Good360 checkout, and bill me separately for the $500 E-Comsetter service fee after successful purchase. The service fee is NOT auto-charged to my card.</span>
+                            </label>
+                            <label class="flex items-start gap-3 group cursor-pointer">
+                                <input required class="mt-1 rounded text-primary w-4 h-4" type="checkbox">
+                                <span class="text-sm font-medium group-hover:text-primary transition-colors"><strong>Payment Terms:</strong> I understand that I will be billed a $500 E-Comsetter service fee for each successful truck purchase. The service fee is only charged upon successful purchase, not for monitoring or missed opportunities.</span>
+                            </label>
+                            <label class="flex items-start gap-3 group cursor-pointer">
+                                <input required class="mt-1 rounded text-primary w-4 h-4" type="checkbox">
+                                <span class="text-sm font-medium group-hover:text-primary transition-colors"><strong>Cooldown Policy:</strong> I understand that after a successful truck purchase, a 7-day cooldown period applies before the next purchase can be initiated for my organization. I will be notified of truck availability during cooldown but cannot purchase until the period ends.</span>
+                            </label>
+                            <label class="flex items-start gap-3 group cursor-pointer">
+                                <input required class="mt-1 rounded text-primary w-4 h-4" type="checkbox">
+                                <span class="text-sm font-medium group-hover:text-primary transition-colors"><strong>Service Limitations:</strong> I understand that Good360 truckloads are donated inventory with limited availability. E-Comsetter does not guarantee truck availability or successful purchases. Truck availability changes rapidly and may sell out before checkout completion.</span>
+                            </label>
+                            <label class="flex items-start gap-3 group cursor-pointer">
+                                <input required class="mt-1 rounded text-primary w-4 h-4" type="checkbox">
+                                <span class="text-sm font-medium group-hover:text-primary transition-colors"><strong>Data & Privacy:</strong> I consent to E-Comsetter storing my organization and payment information for the purpose of monitoring and purchasing truckloads. I understand I can request data deletion at any time.</span>
+                            </label>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- 10. Digital Signature -->
+                <section id="signature" class="space-y-6 pb-24">
+                    <div class="flex items-baseline justify-between border-b border-gray-200 pb-2">
+                        <h2 class="text-2xl font-bold tracking-tight">Digital Signature</h2>
+                        <span class="text-xs font-bold text-primary tracking-widest uppercase">Section 10</span>
+                    </div>
+                    <div class="p-6 bg-surface-container-low rounded-xl space-y-6">
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            <div class="space-y-2">
+                                <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Printed Name <span class="text-primary">*</span></label>
+                                <input name="signature_name" required class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="Full Legal Name" type="text">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Title <span class="text-primary">*</span></label>
+                                <input name="signature_title" required class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all placeholder:text-gray-400" placeholder="Executive Director" type="text">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Date <span class="text-primary">*</span></label>
+                                <input name="signature_date" required class="w-full bg-white border border-gray-200 rounded-lg py-3 px-4 text-sm transition-all" type="date">
+                            </div>
+                        </div>
+                        <div class="space-y-2">
+                            <label class="block text-xs font-bold text-secondary uppercase tracking-wider">Digital Signature (Type Full Name) <span class="text-primary">*</span></label>
+                            <div class="relative">
+                                <input name="digital_signature" required class="w-full bg-white border border-gray-200 rounded-lg py-6 px-4 text-3xl italic text-primary transition-all text-center" placeholder="Type your full name as signature" style="font-family: 'Great Vibes', cursive, serif;" type="text">
+                                <div class="absolute bottom-3 right-4 flex items-center gap-1 text-[10px] text-gray-400 font-bold uppercase">
+                                    <span class="material-symbols-outlined text-xs">verified</span>
+                                    Verified Electronic Signature
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Final Actions -->
+                <div class="flex flex-col md:flex-row gap-6 items-center justify-between border-t border-gray-200 pt-12 pb-24">
+                    <div class="flex items-center gap-4 text-sm text-on-surface-variant">
+                        <span class="material-symbols-outlined text-primary">security</span>
+                        Encrypted data transmission in progress
+                    </div>
+                    <div class="flex gap-4">
+                        <button type="reset" class="px-8 py-4 text-sm font-bold text-primary hover:bg-red-50 rounded-lg transition-all">Clear Form</button>
+                        <button type="submit" class="px-12 py-4 primary-gradient text-white font-bold rounded-lg shadow-lg shadow-primary/20 hover:scale-[1.02] active:scale-95 transition-all text-lg tracking-wide">Submit Application</button>
+                    </div>
+                </div>
+            </form>
+
+            <!-- Footer -->
+            <footer class="bg-gray-100 py-8 px-8 border-t border-gray-200">
+                <div class="max-w-5xl mx-auto flex flex-col md:flex-row justify-between items-center gap-6">
+                    <div class="flex gap-6">
+                        <div class="flex items-center gap-2">
+                            <span class="material-symbols-outlined text-primary">verified</span>
+                            <span class="text-xs font-bold text-secondary uppercase">PCI Compliant</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <span class="material-symbols-outlined text-primary">lock</span>
+                            <span class="text-xs font-bold text-secondary uppercase">256-bit AES</span>
+                        </div>
+                    </div>
+                    <div class="text-xs text-secondary">
+                        © 2026 E-Comsetter. All rights reserved.
+                    </div>
+                </div>
+            </footer>
+        </main>
+    </div>
+
+    <script>
+        document.querySelector('form').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const form = e.target;
+            const formData = new FormData(form);
+            const data = {};
+            
+            // Convert FormData to plain object
+            for (let [key, value] of formData.entries()) {
+                if (data[key]) {
+                    // Handle multiple values (like categories)
+                    if (Array.isArray(data[key])) {
+                        data[key].push(value);
+                    } else {
+                        data[key] = [data[key], value];
+                    }
+                } else {
+                    data[key] = value;
+                }
+            }
+            
+            // Show loading state
+            const submitBtn = form.querySelector('button[type="submit"]');
+            const originalText = submitBtn.textContent;
+            submitBtn.textContent = 'Submitting...';
+            submitBtn.disabled = true;
+            
+            try {
+                const response = await fetch('/api/intake-submit', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    // Show success message
+                    form.innerHTML = `
+                        <div class="text-center py-20">
+                            <div class="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-6">
+                                <span class="material-symbols-outlined text-4xl text-green-600">check_circle</span>
+                            </div>
+                            <h2 class="text-2xl font-bold text-green-800 mb-4">Application Submitted!</h2>
+                            <p class="text-gray-600 mb-2">Reference: <strong>${result.reference}</strong></p>
+                            <p class="text-gray-500">We'll review your application and contact you soon.</p>
+                        </div>
+                    `;
+                } else {
+                    throw new Error(result.error || 'Submission failed');
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+                submitBtn.textContent = originalText;
+                submitBtn.disabled = false;
+            }
+        });
+    </script>
+
+    <script>
+        function toggleMenu() {
+            document.getElementById('sidebar').classList.toggle('open');
+            document.getElementById('sidebar-overlay').classList.toggle('open');
+        }
+    </script>
+</body>
+</html>
