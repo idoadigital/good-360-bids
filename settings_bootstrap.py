@@ -29,6 +29,14 @@ _KEYS_TO_LOAD = (
     "SCAN_GOOD360_EMAIL",
     "SCAN_GOOD360_PASSWORD",
     "OPENAI_API_KEY",
+    # Telegram alert credentials live in the encrypted dashboard DB so the
+    # operator can rotate them through the admin UI. Hydrate into env so the
+    # send_telegram* functions in good360_monitor / autobuy / watchdog /
+    # report / deadman_switch can reach the API.
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_GROUP_HOPE4HUMANITY",
+    "TELEGRAM_GROUP_REVIVING_HOMES",
+    "TELEGRAM_OPERATOR_CHAT_ID",
 )
 
 

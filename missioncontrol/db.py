@@ -128,6 +128,72 @@ CREATE TABLE IF NOT EXISTS sync_state (
     value        TEXT,
     updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- ============================================================
+-- Notifications: every outbound Telegram message gets recorded
+-- here so the admin UI can mirror what operators see in chat.
+-- Body is plaintext (it's the same text already in Telegram —
+-- not a secret).
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS notifications (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts         TEXT NOT NULL DEFAULT (datetime('now')),
+    source     TEXT NOT NULL,                     -- monitor|autobuy|watchdog|report|deadman
+    level      TEXT NOT NULL,                     -- info|warn|error|success
+    channel    TEXT,                              -- operator|org:<key>|null
+    title      TEXT,                              -- first line of message
+    message    TEXT NOT NULL,                     -- full body sent to telegram
+    delivered  INTEGER NOT NULL DEFAULT 0,        -- 1 if API returned ok
+    error      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_ts     ON notifications(ts);
+CREATE INDEX IF NOT EXISTS idx_notifications_level  ON notifications(level);
+CREATE INDEX IF NOT EXISTS idx_notifications_source ON notifications(source);
+
+-- ============================================================
+-- Test runs: admin-triggered checkout smoke tests.
+-- We never persist card PAN or CVV — only brand + last4 for the
+-- audit trail. Full PAN lives in memory only for the duration of
+-- a Playwright session.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS test_runs (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts               TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at       TEXT,
+    finished_at      TEXT,
+    status           TEXT NOT NULL,        -- stubbed|queued|running|completed|failed
+    customer_name    TEXT,
+    customer_email   TEXT,
+    truck_url        TEXT,
+    card_brand       TEXT,
+    card_last4       TEXT,                  -- 4 chars, never the full PAN
+    result_summary   TEXT,                  -- one-line outcome from the runner
+    error            TEXT,                  -- multi-line error / page text
+    screenshot_path  TEXT,                  -- workdir-relative path if captured
+    created_by_user_id INTEGER REFERENCES users(id)
+);
+CREATE INDEX IF NOT EXISTS idx_test_runs_ts ON test_runs(ts);
+
+-- ============================================================
+-- Good360 login attempts: every time the monitor (or any worker)
+-- tries to authenticate against Good360. NOT to be confused with
+-- the dashboard's own login_attempts table above (which tracks
+-- admin-login rate limiting). Used by the Scans page's "Login
+-- health" panel.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS good360_login_attempts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT NOT NULL DEFAULT (datetime('now')),
+    source      TEXT NOT NULL,        -- monitor|autobuy|test_run|manual
+    email       TEXT,                 -- email used to attempt login
+    success     INTEGER NOT NULL,     -- 1 / 0
+    duration_ms INTEGER,              -- end-to-end time including page loads
+    error       TEXT                  -- exception/page text on failure
+);
+CREATE INDEX IF NOT EXISTS idx_g360_login_ts ON good360_login_attempts(ts);
 """
 
 

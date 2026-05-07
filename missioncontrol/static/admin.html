@@ -39,6 +39,19 @@
                 <span>Purchases</span>
                 <span class="badge" id="purchasesBadge">—</span>
             </button>
+            <button class="nav-item tab" data-tab="notifications">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+                </svg>
+                <span>Notifications</span>
+                <span class="badge" id="notificationsBadge">—</span>
+            </button>
+            <button class="nav-item tab" data-tab="analytics">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="3" y1="12" x2="3" y2="20"/><line x1="9" y1="6" x2="9" y2="20"/><line x1="15" y1="3" x2="15" y2="20"/><line x1="21" y1="9" x2="21" y2="20"/>
+                </svg>
+                <span>Analytics</span>
+            </button>
 
             <div class="sidebar-section-label">Manage</div>
             <button class="nav-item tab" data-tab="customers">
@@ -62,6 +75,12 @@
                     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.36.16.66.42.87.74.21.32.32.7.32 1.09 0 .39-.11.77-.32 1.09-.21.32-.51.58-.87.74Z"/>
                 </svg>
                 <span>Settings</span>
+            </button>
+            <button class="nav-item tab super-only" data-tab="testbuy">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 12l2 2 4-4"/><path d="M21 12c0 4.97-4.03 9-9 9s-9-4.03-9-9 4.03-9 9-9 9 4.03 9 9z"/>
+                </svg>
+                <span>Test buy</span>
             </button>
             <button class="nav-item tab" data-tab="audit">
                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -126,14 +145,20 @@
 
                 <div class="metric-grid">
                     <div class="metric-card">
-                        <div class="label">Last scan</div>
+                        <div class="label">
+                            Last scan
+                            <span class="scan-pulse" id="scanPulse" hidden title="A check is in flight">
+                                <span class="scan-pulse__ring"></span>
+                                <span class="scan-pulse__core"></span>
+                            </span>
+                        </div>
                         <div class="value" id="metricLastScan">—</div>
                         <div class="meta" id="metricLastScanMeta">no data yet</div>
                     </div>
                     <div class="metric-card accent">
-                        <div class="label">Scans / window</div>
-                        <div class="value" id="metricScanCount">0</div>
-                        <div class="meta">last 200 entries</div>
+                        <div class="label">Next check</div>
+                        <div class="value" id="metricCountdown">—</div>
+                        <div class="meta" id="metricCountdownMeta">interval not yet inferred</div>
                     </div>
                     <div class="metric-card primary">
                         <div class="label">Errors (recent)</div>
@@ -157,11 +182,72 @@
 
                 <div class="surface-card" style="margin-bottom:var(--space-3)">
                     <div class="surface-card-head">
+                        <h2>Login health</h2>
+                        <span class="sub" id="loginMeta">—</span>
+                    </div>
+                    <div class="surface-card-body" id="loginBody">
+                        <div class="login-row">
+                            <div class="login-row__label">Last login</div>
+                            <div class="login-row__value" id="loginLast">—</div>
+                        </div>
+                        <div class="login-row" id="loginLastFailRow" hidden>
+                            <div class="login-row__label">Last failure</div>
+                            <div class="login-row__value" id="loginLastFail">—</div>
+                        </div>
+                        <div class="login-row">
+                            <div class="login-row__label">Recent attempts</div>
+                            <div class="login-row__value" id="loginAttempts">—</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="surface-card" style="margin-bottom:var(--space-3)">
+                    <div class="surface-card-head">
+                        <h2>Roster</h2>
+                        <span class="sub" id="rosterMeta">—</span>
+                    </div>
+                    <div class="surface-card-body" id="rosterBody">
+                        <div class="roster-row">
+                            <div class="roster-row__label">Next up</div>
+                            <div class="roster-row__value" id="rosterNext">—</div>
+                        </div>
+                        <div class="roster-row">
+                            <div class="roster-row__label">Last buy</div>
+                            <div class="roster-row__value" id="rosterLast">—</div>
+                        </div>
+                        <div class="roster-row">
+                            <div class="roster-row__label">Cool-off</div>
+                            <div class="roster-row__value" id="rosterCool">—</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="surface-card" style="margin-bottom:var(--space-3)">
+                    <div class="surface-card-head">
                         <h2>Live log tail</h2>
-                        <span class="sub" id="tailMeta">—</span>
+                        <span class="sub">
+                            <span class="filter-group" id="checkFilters">
+                                <button class="filter-pill active" data-filter-check="">All</button>
+                                <button class="filter-pill" data-filter-check="found">Found new</button>
+                                <button class="filter-pill" data-filter-check="no-new">No new</button>
+                                <button class="filter-pill" data-filter-check="error">Errors</button>
+                            </span>
+                            <span id="tailMeta">—</span>
+                        </span>
                     </div>
                     <div class="surface-card-body flush">
-                        <pre class="log-tail" id="logTail"><em style="color:var(--text-mute)">no log yet — start the monitor service</em></pre>
+                        <div class="check-list" id="checkList">
+                            <div class="check-empty"><em>no log yet — start the monitor service</em></div>
+                        </div>
+                        <div class="pagination" id="checkPager" hidden>
+                            <button class="pager-btn" data-pg="prev" aria-label="Previous page">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                            </button>
+                            <span class="pager-info" id="checkPagerInfo">—</span>
+                            <button class="pager-btn" data-pg="next" aria-label="Next page">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -171,12 +257,22 @@
                         <span class="sub" id="hbStatus">heartbeat: —</span>
                     </div>
                     <div class="surface-card-body flush">
-                        <table class="data" id="scansTable">
+                        <table class="data expandable" id="scansTable">
                             <thead><tr>
+                                <th style="width:24px"></th>
                                 <th>Time</th><th>Org</th><th>Login</th><th>Truck</th><th>Status</th>
                             </tr></thead>
                             <tbody></tbody>
                         </table>
+                        <div class="pagination" id="scansPager" hidden>
+                            <button class="pager-btn" data-pg="prev" aria-label="Previous page">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                            </button>
+                            <span class="pager-info" id="scansPagerInfo">—</span>
+                            <button class="pager-btn" data-pg="next" aria-label="Next page">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                            </button>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -248,6 +344,18 @@
                     </div>
                 </div>
 
+                <div class="autobuy-bar" id="cdAutobuyBar" hidden>
+                    <div class="autobuy-bar__label">
+                        <span>Autobuy for this customer</span>
+                        <small id="cdAutobuyHint">decides whether the round-robin includes them</small>
+                    </div>
+                    <button class="autobuy-toggle off" type="button" id="cdAutobuyToggle"
+                            role="switch" aria-checked="false"
+                            aria-label="Autobuy for this customer">
+                        <span class="autobuy-toggle__track"><span class="autobuy-toggle__thumb"></span></span>
+                    </button>
+                </div>
+
                 <div class="metric-grid">
                     <div class="metric-card" id="cdMetricStatus">
                         <div class="label">Status</div>
@@ -271,49 +379,100 @@
                     </div>
                 </div>
 
-                <div class="surface-card" style="margin-bottom:var(--space-3)">
-                    <div class="surface-card-head"><h2>Profile</h2></div>
-                    <div class="surface-card-body">
-                        <dl class="kv-grid" id="cdProfile"></dl>
+                <div class="cd-tabs" id="cdTabs">
+                    <button class="cd-tab active" data-cd-tab="profile">Profile</button>
+                    <button class="cd-tab" data-cd-tab="history">Buy history</button>
+                </div>
+
+                <div class="cd-tabpanel active" data-cd-panel="profile">
+                    <div class="surface-card" style="margin-bottom:var(--space-3)">
+                        <div class="surface-card-head"><h2>Profile</h2></div>
+                        <div class="surface-card-body">
+                            <dl class="kv-grid" id="cdProfile"></dl>
+                        </div>
+                    </div>
+
+                    <div class="surface-card" style="margin-bottom:var(--space-3)">
+                        <div class="surface-card-head"><h2>Operations</h2></div>
+                        <div class="surface-card-body">
+                            <dl class="kv-grid" id="cdOps"></dl>
+                        </div>
+                    </div>
+
+                    <div class="surface-card" style="margin-bottom:var(--space-3)">
+                        <div class="surface-card-head">
+                            <h2>Partner credentials</h2>
+                            <span class="sub" id="cdCredsSub">click "Show full record" to reveal</span>
+                        </div>
+                        <div class="surface-card-body">
+                            <dl class="kv-grid" id="cdCreds">
+                                <dt>username</dt><dd class="mono"><em style="color:var(--text-mute)">hidden — click "Show full record"</em></dd>
+                                <dt>password</dt><dd class="mono"><em style="color:var(--text-mute)">hidden</em></dd>
+                            </dl>
+                        </div>
+                    </div>
+
+                    <div class="surface-card" style="margin-bottom:var(--space-3)">
+                        <div class="surface-card-head">
+                            <h2>Payment methods</h2>
+                            <span class="sub" id="cdCardsSub">card numbers and CVVs are masked even after reveal</span>
+                        </div>
+                        <div class="surface-card-body">
+                            <div id="cdCards"><em style="color:var(--text-mute)">hidden — click "Show full record"</em></div>
+                        </div>
+                    </div>
+
+                    <div class="surface-card">
+                        <div class="surface-card-head"><h2>Acknowledgements</h2></div>
+                        <div class="surface-card-body">
+                            <dl class="kv-grid" id="cdAcks">
+                                <dt colspan="2"><em style="color:var(--text-mute)">live fetch only</em></dt>
+                            </dl>
+                        </div>
                     </div>
                 </div>
 
-                <div class="surface-card" style="margin-bottom:var(--space-3)">
-                    <div class="surface-card-head"><h2>Operations</h2></div>
-                    <div class="surface-card-body">
-                        <dl class="kv-grid" id="cdOps"></dl>
+                <div class="cd-tabpanel" data-cd-panel="history">
+                    <div class="metric-grid">
+                        <div class="metric-card ok">
+                            <div class="label">Successful buys</div>
+                            <div class="value" id="cdHistOk">0</div>
+                            <div class="meta">all-time</div>
+                        </div>
+                        <div class="metric-card primary">
+                            <div class="label">Failed attempts</div>
+                            <div class="value" id="cdHistFail">0</div>
+                            <div class="meta">all-time</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="label">Total spent</div>
+                            <div class="value" id="cdHistTotal">$0</div>
+                            <div class="meta">on successes</div>
+                        </div>
                     </div>
-                </div>
 
-                <div class="surface-card" style="margin-bottom:var(--space-3)">
-                    <div class="surface-card-head">
-                        <h2>Partner credentials</h2>
-                        <span class="sub" id="cdCredsSub">click "Show full record" to reveal</span>
-                    </div>
-                    <div class="surface-card-body">
-                        <dl class="kv-grid" id="cdCreds">
-                            <dt>username</dt><dd class="mono"><em style="color:var(--text-mute)">hidden — click "Show full record"</em></dd>
-                            <dt>password</dt><dd class="mono"><em style="color:var(--text-mute)">hidden</em></dd>
-                        </dl>
-                    </div>
-                </div>
-
-                <div class="surface-card" style="margin-bottom:var(--space-3)">
-                    <div class="surface-card-head">
-                        <h2>Payment methods</h2>
-                        <span class="sub" id="cdCardsSub">card numbers and CVVs are masked even after reveal</span>
-                    </div>
-                    <div class="surface-card-body">
-                        <div id="cdCards"><em style="color:var(--text-mute)">hidden — click "Show full record"</em></div>
-                    </div>
-                </div>
-
-                <div class="surface-card">
-                    <div class="surface-card-head"><h2>Acknowledgements</h2></div>
-                    <div class="surface-card-body">
-                        <dl class="kv-grid" id="cdAcks">
-                            <dt colspan="2"><em style="color:var(--text-mute)">live fetch only</em></dt>
-                        </dl>
+                    <div class="surface-card">
+                        <div class="surface-card-head">
+                            <h2>Transactions</h2>
+                            <span class="sub" id="cdHistSub">—</span>
+                        </div>
+                        <div class="surface-card-body flush">
+                            <table class="data" id="cdHistoryTable">
+                                <thead><tr>
+                                    <th>Time</th><th>Truck</th><th>Total</th><th>Status</th><th>Detail</th>
+                                </tr></thead>
+                                <tbody></tbody>
+                            </table>
+                            <div class="pagination" id="cdHistPager" hidden>
+                                <button class="pager-btn" data-pg="prev" aria-label="Previous page">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                                </button>
+                                <span class="pager-info" id="cdHistPagerInfo">—</span>
+                                <button class="pager-btn" data-pg="next" aria-label="Next page">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -377,13 +536,41 @@
                         <span class="sub" id="custRosterSub">—</span>
                     </div>
                     <div class="surface-card-body flush">
+                        <div class="toolbar">
+                            <div class="toolbar-search">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+                                <input id="custSearch" type="search" placeholder="Search org, name, or email…" autocomplete="off">
+                            </div>
+                            <div class="filter-group" id="custStatusFilters">
+                                <button class="filter-pill active" data-cust-status="">All</button>
+                                <button class="filter-pill" data-cust-status="active">Active</button>
+                                <button class="filter-pill" data-cust-status="paused">Paused</button>
+                                <button class="filter-pill" data-cust-status="onboarding">Onboarding</button>
+                                <button class="filter-pill" data-cust-status="inactive">Inactive</button>
+                            </div>
+                            <div class="filter-group" id="custAutobuyFilters">
+                                <button class="filter-pill active" data-cust-autobuy="">Any autobuy</button>
+                                <button class="filter-pill" data-cust-autobuy="on">Autobuy on</button>
+                                <button class="filter-pill" data-cust-autobuy="off">Autobuy off</button>
+                                <button class="filter-pill" data-cust-autobuy="cool">Cool-off</button>
+                            </div>
+                        </div>
                         <table class="data" id="customersTable">
                             <thead><tr>
-                                <th>Org</th><th>Status</th><th>Priority</th><th>Max budget</th>
+                                <th>Org</th><th>Status</th><th>Autobuy</th><th>Priority</th><th>Max budget</th>
                                 <th>Last used</th><th>Updated</th>
                             </tr></thead>
                             <tbody></tbody>
                         </table>
+                        <div class="pagination" id="custPager" hidden>
+                            <button class="pager-btn" data-pg="prev" aria-label="Previous page">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                            </button>
+                            <span class="pager-info" id="custPagerInfo">—</span>
+                            <button class="pager-btn" data-pg="next" aria-label="Next page">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                            </button>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -571,6 +758,393 @@
                 </div>
             </section>
 
+            <!-- ============ NOTIFICATIONS ============ -->
+            <section data-panel="notifications" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <h1>Notifications</h1>
+                        <p class="lede">Every alert that's been pushed to Telegram. Mirrored from the dashboard's own log so you can review history without scrolling chat.</p>
+                    </div>
+                    <div class="panel-actions">
+                        <button id="notifRefreshBtn" class="btn btn-ghost">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><polyline points="21 3 21 9 15 9"/></svg>
+                            Refresh
+                        </button>
+                    </div>
+                </div>
+
+                <div class="metric-grid">
+                    <div class="metric-card">
+                        <div class="label">Total (7d)</div>
+                        <div class="value" id="notifTotal">0</div>
+                        <div class="meta">all sources</div>
+                    </div>
+                    <div class="metric-card primary">
+                        <div class="label">Errors</div>
+                        <div class="value" id="notifErrors">0</div>
+                        <div class="meta">last 7 days</div>
+                    </div>
+                    <div class="metric-card accent">
+                        <div class="label">Warnings</div>
+                        <div class="value" id="notifWarns">0</div>
+                        <div class="meta">last 7 days</div>
+                    </div>
+                    <div class="metric-card ok">
+                        <div class="label">Success / info</div>
+                        <div class="value" id="notifInfo">0</div>
+                        <div class="meta">last 7 days</div>
+                    </div>
+                </div>
+
+                <div class="surface-card">
+                    <div class="surface-card-head">
+                        <h2>Recent alerts</h2>
+                        <span class="sub">
+                            <span class="filter-group" id="notifFilters">
+                                <button class="filter-pill active" data-filter-level="">All</button>
+                                <button class="filter-pill" data-filter-level="error">Errors</button>
+                                <button class="filter-pill" data-filter-level="warn">Warns</button>
+                                <button class="filter-pill" data-filter-level="success">Success</button>
+                                <button class="filter-pill" data-filter-level="info">Info</button>
+                            </span>
+                        </span>
+                    </div>
+                    <div class="surface-card-body flush">
+                        <div class="check-list" id="notifList">
+                            <div class="check-empty"><em>no notifications yet — alerts will appear here as soon as the system pushes its first Telegram message</em></div>
+                        </div>
+                        <div class="pagination" id="notifPager" hidden>
+                            <button class="pager-btn" data-pg="prev" aria-label="Previous page">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                            </button>
+                            <span class="pager-info" id="notifPagerInfo">—</span>
+                            <button class="pager-btn" data-pg="next" aria-label="Next page">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============ ANALYTICS ============ -->
+            <section data-panel="analytics" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <h1>Analytics</h1>
+                        <p class="lede">Insights from scan activity, alerts, and the customer roster. <span id="analyticsRangeLabel">last 30 days</span>.</p>
+                    </div>
+                    <div class="panel-actions">
+                        <div class="filter-group" id="analyticsRange">
+                            <button class="filter-pill" data-range="7">7d</button>
+                            <button class="filter-pill active" data-range="30">30d</button>
+                            <button class="filter-pill" data-range="90">90d</button>
+                            <button class="filter-pill" data-range="365">1y</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="metric-grid">
+                    <div class="metric-card">
+                        <div class="label">Scans</div>
+                        <div class="value" id="anaScanCount">—</div>
+                        <div class="meta" id="anaScanMeta">in window</div>
+                    </div>
+                    <div class="metric-card accent">
+                        <div class="label">Trucks observed</div>
+                        <div class="value" id="anaObsCount">—</div>
+                        <div class="meta" id="anaObsMeta">across all scans</div>
+                    </div>
+                    <div class="metric-card ok">
+                        <div class="label">Available rate</div>
+                        <div class="value" id="anaAvailRate">—%</div>
+                        <div class="meta" id="anaAvailMeta">— available / — observed</div>
+                    </div>
+                    <div class="metric-card primary">
+                        <div class="label">Alerts sent</div>
+                        <div class="value" id="anaAlertsSent">—</div>
+                        <div class="meta" id="anaAlertsMeta">in window</div>
+                    </div>
+                </div>
+
+                <div class="metric-grid" style="margin-top:0">
+                    <div class="metric-card">
+                        <div class="label">Log errors</div>
+                        <div class="value" id="anaLogErr">—</div>
+                        <div class="meta">recent monitor lines</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="label">Log warns</div>
+                        <div class="value" id="anaLogWarn">—</div>
+                        <div class="meta">recent monitor lines</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="label">Notifications</div>
+                        <div class="value" id="anaNotifTotal">—</div>
+                        <div class="meta" id="anaNotifMeta">— delivered</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="label">Customers</div>
+                        <div class="value" id="anaCustTotal">—</div>
+                        <div class="meta" id="anaCustMeta">— active in autobuy</div>
+                    </div>
+                </div>
+
+                <div class="chart-grid">
+                    <div class="surface-card chart-card">
+                        <div class="surface-card-head">
+                            <h2>Scans per day</h2>
+                            <span class="sub">monitor pass count</span>
+                        </div>
+                        <div class="surface-card-body">
+                            <div class="chart-host"><canvas id="chartScans"></canvas></div>
+                        </div>
+                    </div>
+
+                    <div class="surface-card chart-card">
+                        <div class="surface-card-head">
+                            <h2>Availability by hour-of-day</h2>
+                            <span class="sub">when scans typically run · 0–23</span>
+                        </div>
+                        <div class="surface-card-body">
+                            <div class="chart-host"><canvas id="chartHour"></canvas></div>
+                        </div>
+                    </div>
+
+                    <div class="surface-card chart-card chart-card--full">
+                        <div class="surface-card-head">
+                            <h2>Truck availability frequency</h2>
+                            <span class="sub">how often each tracked truck shows up as available</span>
+                        </div>
+                        <div class="surface-card-body">
+                            <div class="chart-host"><canvas id="chartTrucks"></canvas></div>
+                        </div>
+                    </div>
+
+                    <div class="surface-card chart-card chart-card--wide">
+                        <div class="surface-card-head">
+                            <h2>Notifications by level</h2>
+                            <span class="sub">stacked daily volume from the dashboard's Telegram mirror</span>
+                        </div>
+                        <div class="surface-card-body">
+                            <div class="chart-host"><canvas id="chartNotifs"></canvas></div>
+                        </div>
+                    </div>
+
+                    <div class="surface-card chart-card">
+                        <div class="surface-card-head">
+                            <h2>Customer mix</h2>
+                            <span class="sub">status + autobuy participation</span>
+                        </div>
+                        <div class="surface-card-body">
+                            <div class="chart-host"><canvas id="chartCustomers"></canvas></div>
+                        </div>
+                    </div>
+
+                    <div class="surface-card chart-card chart-card--full">
+                        <div class="surface-card-head">
+                            <h2>Top trucks by availability</h2>
+                            <span class="sub" id="anaTrucksSub">—</span>
+                        </div>
+                        <div class="surface-card-body flush">
+                            <table class="data" id="anaTrucksTable">
+                                <thead><tr>
+                                    <th>Truck</th><th>Available</th><th>Observed</th><th>Rate</th>
+                                </tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="surface-card" id="anaGapsCard" style="margin-top:var(--space-3)" hidden>
+                    <div class="surface-card-head">
+                        <h2>Data gaps</h2>
+                        <span class="sub">things this report can't yet show — and why</span>
+                    </div>
+                    <div class="surface-card-body">
+                        <ul class="data-gaps" id="anaGaps"></ul>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============ TEST BUY ============ -->
+            <section data-panel="testbuy" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <h1>Test buy</h1>
+                        <p class="lede">Smoke-test the checkout flow against Good360 with our master account and a card you supply. Used to confirm the buy pipeline is healthy without burning real customer funds.</p>
+                    </div>
+                </div>
+
+                <div class="warn-banner">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;margin-top:1px">
+                        <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+                    </svg>
+                    <div>
+                        <strong>DevTools MCP agent — drives a real Chrome session against Good360 via OpenAI's Agents SDK.</strong>
+                        <span class="warn-text">
+                            Login uses the <strong>master scan account</strong> (SCAN_GOOD360_*). The buyer name + email below are typed into Good360's checkout fields. The card you supply is the test card the agent will fill on the payment page. By default <strong>Live submit is off</strong> — the agent stops before clicking Place Order and returns DRY_RUN. To capture a real "card declined" error, tick Live submit (requires DEVTOOLS_AGENT_ALLOW_LIVE_PURCHASE + DEVTOOLS_AGENT_ALLOW_SECRETS_TO_MODEL = true in Settings). Only one test runs at a time. Tokens cost ~$0.05–$0.50 per run.
+                        </span>
+                    </div>
+                </div>
+
+                <div class="surface-card" style="margin-bottom:var(--space-3)">
+                    <div class="surface-card-head">
+                        <h2>Run a new test</h2>
+                        <span class="sub">PAN + CVV are read once and discarded — only brand + last4 are stored</span>
+                    </div>
+                    <div class="surface-card-body">
+                        <form id="testbuyForm" novalidate class="testbuy-form">
+                            <label class="span-2">Prefill from customer
+                                <select id="testbuyCustomer" class="select-input" aria-label="Pick a customer to prefill the test form">
+                                    <option value="">— blank / manual entry —</option>
+                                </select>
+                                <small>Selecting a customer fills the buyer name, email, and a standard test card (4242 4242 4242 4242 · 12/30 · 123). Master login is always the SCAN account from Settings — the dropdown only changes what gets typed into Good360's checkout.</small>
+                            </label>
+                            <label>Customer name (cardholder)
+                                <input type="text" name="customer_name" autocomplete="cc-name" required>
+                            </label>
+                            <label>Customer email
+                                <input type="email" name="customer_email" autocomplete="email" required>
+                            </label>
+                            <label class="span-2">Truck URL <small>(leave blank to auto-pick the first available truck on the next run)</small>
+                                <input type="url" name="truck_url" placeholder="https://marketplace.good360.org/…" autocomplete="off">
+                            </label>
+                            <label class="span-2">Card number
+                                <input type="text" inputmode="numeric" name="card_number" placeholder="4242 4242 4242 4242" autocomplete="cc-number" required maxlength="23">
+                            </label>
+                            <label>Expiry (MMYY)
+                                <input type="text" inputmode="numeric" name="card_expiry" placeholder="1228" autocomplete="cc-exp" required maxlength="6">
+                            </label>
+                            <label>CVV
+                                <input type="text" inputmode="numeric" name="card_cvv" placeholder="123" autocomplete="cc-csc" required maxlength="4">
+                            </label>
+                            <label class="span-2 testbuy-livesubmit">
+                                <input type="checkbox" name="live_submit">
+                                <span>Live submit — actually click Place Order</span>
+                                <small>Off (default) = agent stops before Place Order, returns DRY_RUN with the filled-in payment page captured. Requires DEVTOOLS_AGENT_ALLOW_LIVE_PURCHASE + DEVTOOLS_AGENT_ALLOW_SECRETS_TO_MODEL = true in Settings before live submit will run.</small>
+                            </label>
+                            <p class="error" id="testbuyErr"></p>
+                            <div class="testbuy-actions">
+                                <button type="submit" class="btn btn-primary" id="testbuySubmit">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                                    Run test
+                                </button>
+                                <button type="reset" class="btn btn-ghost">Clear</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <div class="surface-card">
+                    <div class="surface-card-head">
+                        <h2>Test history</h2>
+                        <span class="sub" id="testbuySub">—</span>
+                    </div>
+                    <div class="surface-card-body flush">
+                        <table class="data" id="testbuyTable">
+                            <thead><tr>
+                                <th class="audit-col-time">Time</th>
+                                <th>Status</th>
+                                <th>Cardholder</th>
+                                <th>Card</th>
+                                <th>Truck</th>
+                                <th>Outcome</th>
+                                <th></th>
+                            </tr></thead>
+                            <tbody></tbody>
+                        </table>
+                        <div class="pagination" id="testbuyPager" hidden>
+                            <button class="pager-btn" data-pg="prev" aria-label="Previous page">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                            </button>
+                            <span class="pager-info" id="testbuyPagerInfo">—</span>
+                            <button class="pager-btn" data-pg="next" aria-label="Next page">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============ TEST DETAIL (sub-page of testbuy) ============ -->
+            <section data-panel="test-detail" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <h1 id="tdName">Test run</h1>
+                        <p class="lede" id="tdSub">—</p>
+                    </div>
+                    <div class="panel-actions">
+                        <button class="btn btn-ghost tab" data-tab="testbuy">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                            Back
+                        </button>
+                    </div>
+                </div>
+
+                <div class="metric-grid">
+                    <div class="metric-card" id="tdStatusCard">
+                        <div class="label">Status</div>
+                        <div class="value" id="tdStatus">—</div>
+                        <div class="meta" id="tdStatusMeta">—</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="label">Started</div>
+                        <div class="value" id="tdStarted">—</div>
+                        <div class="meta" id="tdDuration">—</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="label">Card</div>
+                        <div class="value mono" id="tdCard">—</div>
+                        <div class="meta" id="tdCardMeta">—</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="label">Buyer</div>
+                        <div class="value" id="tdBuyer">—</div>
+                        <div class="meta" id="tdBuyerEmail">—</div>
+                    </div>
+                </div>
+
+                <div class="surface-card" style="margin-bottom:var(--space-3)">
+                    <div class="surface-card-head"><h2>Outcome</h2></div>
+                    <div class="surface-card-body">
+                        <p class="td-summary" id="tdSummary">—</p>
+                        <pre class="td-error" id="tdError" hidden></pre>
+                    </div>
+                </div>
+
+                <div class="surface-card" style="margin-bottom:var(--space-3)" id="tdScreenshotCard" hidden>
+                    <div class="surface-card-head">
+                        <h2>End-of-run screenshot</h2>
+                        <span class="sub">captured after the Place Order click — may include filled card digits</span>
+                    </div>
+                    <div class="surface-card-body" style="padding:0">
+                        <a href="#" id="tdScreenshotLink" target="_blank" rel="noopener">
+                            <img id="tdScreenshot" alt="Test run screenshot" style="width:100%;display:block">
+                        </a>
+                    </div>
+                </div>
+
+                <div class="surface-card" style="margin-bottom:var(--space-3)">
+                    <div class="surface-card-head"><h2>Run metadata</h2></div>
+                    <div class="surface-card-body">
+                        <dl class="kv-grid" id="tdMeta"></dl>
+                    </div>
+                </div>
+
+                <div class="surface-card">
+                    <div class="surface-card-head"><h2>Audit trail</h2></div>
+                    <div class="surface-card-body flush">
+                        <table class="data" id="tdAuditTable">
+                            <thead><tr>
+                                <th class="audit-col-time">Time</th><th>User</th><th>Action</th><th>Detail</th>
+                            </tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
             <!-- ============ AUDIT ============ -->
             <section data-panel="audit" class="panel">
                 <div class="panel-header">
@@ -583,15 +1157,40 @@
                 <div class="surface-card">
                     <div class="surface-card-head">
                         <h2>Recent activity</h2>
-                        <span class="sub">super-admin only</span>
+                        <span class="sub" id="auditSub">super-admin only</span>
                     </div>
                     <div class="surface-card-body flush">
+                        <div class="toolbar">
+                            <div class="toolbar-search">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+                                <input id="auditSearch" type="search" placeholder="Search action, target, detail, IP…" autocomplete="off">
+                            </div>
+                            <select id="auditUserFilter" class="select-input" aria-label="Filter by user">
+                                <option value="">All users</option>
+                            </select>
+                            <div class="filter-group" id="auditDateFilters">
+                                <button class="filter-pill" data-audit-days="1">Today</button>
+                                <button class="filter-pill" data-audit-days="7">Week</button>
+                                <button class="filter-pill active" data-audit-days="30">Month</button>
+                                <button class="filter-pill" data-audit-days="365">Year</button>
+                                <button class="filter-pill" data-audit-days="0">All</button>
+                            </div>
+                        </div>
                         <table class="data" id="auditTable">
                             <thead><tr>
-                                <th>Time</th><th>User</th><th>Action</th><th>Target</th><th>Detail</th><th>IP</th>
+                                <th class="audit-col-time">Time</th><th>User</th><th>Action</th><th>Target</th><th>Detail</th><th>IP</th>
                             </tr></thead>
                             <tbody></tbody>
                         </table>
+                        <div class="pagination" id="auditPager" hidden>
+                            <button class="pager-btn" data-pg="prev" aria-label="Previous page">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                            </button>
+                            <span class="pager-info" id="auditPagerInfo">—</span>
+                            <button class="pager-btn" data-pg="next" aria-label="Next page">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                            </button>
+                        </div>
                     </div>
                 </div>
             </section>

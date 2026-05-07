@@ -229,7 +229,10 @@ def load_log():
         return {"runs": []}
 
 def save_log(log):
-    log["runs"] = log["runs"][-200:]
+    # Retain ~7 days of scan history at the current ~60s cadence so the
+    # Analytics page has a useful window. The whole file is rewritten on
+    # every scan, so bumping much higher than this is wasteful.
+    log["runs"] = log["runs"][-10000:]
     with open(LOG_FILE, "w") as f:
         json.dump(log, f, indent=2)
 
@@ -299,6 +302,8 @@ def send_error_alert(error_message):
         log_cron(f"Failed to send error alert email: {e}")
 
     tg_msg = f"Good360 Monitor ERROR\n\nTime: {timestamp}\nError: {error_message}\n\nPlease check the script!\n- E-Comsetter Good360 Monitor"
+    delivered = False
+    err = None
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         payload = {
@@ -308,9 +313,16 @@ def send_error_alert(error_message):
             "disable_web_page_preview": True
         }
         requests.post(url, json=payload, timeout=10)
+        delivered = True
         log_cron("Error alert Telegram sent")
     except Exception as e:
+        err = str(e)
         log_cron(f"Failed to send error alert Telegram: {e}")
+    try:
+        from notifications_log import record_telegram
+        record_telegram(source='monitor', message=tg_msg, delivered=delivered, error=err, channel='operator', level='error')
+    except Exception:
+        pass
 
 # ============================================================
 # PRE-FLIGHT VALIDATION
@@ -367,6 +379,8 @@ def is_autobuy_active():
 def send_telegram(message):
     """Send Telegram message to ALL org groups"""
     url = "https://api.telegram.org/bot" + TELEGRAM_TOKEN + "/sendMessage"
+    any_delivered = False
+    last_err = None
     for chat_id in ALL_TELEGRAM_GROUPS:
         try:
             payload = {
@@ -378,11 +392,19 @@ def send_telegram(message):
             response = requests.post(url, json=payload, timeout=10)
             result = response.json()
             if result.get("ok"):
+                any_delivered = True
                 print(f"Telegram alert sent to {chat_id}!")
             else:
+                last_err = str(result)
                 print(f"Telegram error for {chat_id}: {result}")
         except Exception as e:
+            last_err = str(e)
             print(f"Telegram failed for {chat_id}: {e}")
+    try:
+        from notifications_log import record_telegram
+        record_telegram(source='monitor', message=message, delivered=any_delivered, error=last_err, channel='all-orgs')
+    except Exception:
+        pass
 
 def send_alert_email(available_trucks, subject_prefix="ALERT", extra_note=""):
     msg = MIMEMultipart("alternative")
@@ -448,16 +470,26 @@ def get_org_telegram_group(org_key):
 def send_telegram_to_org(org_key, message):
     """Send Telegram to specific org's group"""
     chat_id = get_org_telegram_group(org_key)
+    delivered = False
+    err = None
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML", "disable_web_page_preview": True}
         result = requests.post(url, json=payload, timeout=10).json()
         if result.get("ok"):
+            delivered = True
             log_cron(f"Telegram alert sent to {org_key} ({chat_id})!")
         else:
+            err = str(result)
             log_cron(f"Telegram error for {org_key} ({chat_id}): {result}")
     except Exception as e:
+        err = str(e)
         log_cron(f"Telegram failed for {org_key} ({chat_id}): {e}")
+    try:
+        from notifications_log import record_telegram
+        record_telegram(source='monitor', message=message, delivered=delivered, error=err, channel=f'org:{org_key}')
+    except Exception:
+        pass
 
 def send_telegram_alert(available_trucks, extra_note=""):
     now = datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d %H:%M:%S")
@@ -805,18 +837,54 @@ def run_autobuy(truck_name, truck_url, admin_fee, org_key=None, org_config=None)
         print(f"  Auto-buy error: {e}")
         return "FAILED", str(e), {"engine": "script", "error": str(e)}
 def check_trucks():
+    # Best-effort import of the login telemetry recorder. If the dashboard
+    # modules aren't reachable (e.g., legacy deploy), keep working anyway.
+    _record_login = None
+    try:
+        import sys as _sys
+        if "/app/missioncontrol" not in _sys.path:
+            _sys.path.insert(0, "/app/missioncontrol")
+        from login_telemetry import record_login_attempt as _record_login
+    except Exception:
+        _record_login = None
+
     results = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1280, "height": 900})
         page = context.new_page()
-        page.goto(GOOD360_LOGIN_URL, wait_until="networkidle", timeout=30000)
-        page.click("text=Login", timeout=10000)
-        page.wait_for_selector('input[placeholder*="email" i]', state="visible", timeout=15000)
-        page.fill('input[placeholder*="email" i]', GOOD360_EMAIL)
-        page.fill('input[placeholder*="password" i]', GOOD360_PASSWORD)
-        page.click('button:has-text("Sign in")', timeout=10000)
-        page.wait_for_load_state("networkidle", timeout=15000)
+        # Login: capture pass/fail telemetry so the dashboard's Login panel
+        # can show what email tried and whether it worked.
+        _login_started = time.time()
+        _login_ok = False
+        _login_err = None
+        try:
+            page.goto(GOOD360_LOGIN_URL, wait_until="networkidle", timeout=30000)
+            page.click("text=Login", timeout=10000)
+            page.wait_for_selector('input[placeholder*="email" i]', state="visible", timeout=15000)
+            page.fill('input[placeholder*="email" i]', GOOD360_EMAIL)
+            page.fill('input[placeholder*="password" i]', GOOD360_PASSWORD)
+            page.click('button:has-text("Sign in")', timeout=10000)
+            page.wait_for_load_state("networkidle", timeout=15000)
+            _login_ok = True
+        except Exception as _exc:
+            _login_err = f"{type(_exc).__name__}: {_exc}"
+            if _record_login:
+                try:
+                    _record_login(source="monitor", email=GOOD360_EMAIL,
+                                  success=False, error=_login_err,
+                                  duration_ms=int((time.time() - _login_started) * 1000))
+                except Exception:
+                    pass
+            raise
+        if _record_login:
+            try:
+                _record_login(source="monitor", email=GOOD360_EMAIL,
+                              success=True, error=None,
+                              duration_ms=int((time.time() - _login_started) * 1000))
+            except Exception:
+                pass
+
         page.goto(GOOD360_URL, wait_until="networkidle", timeout=30000)
         time.sleep(2)
         truck_links = {}

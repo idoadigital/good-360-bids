@@ -38,17 +38,27 @@ def send_telegram(message):
             char_count += len(line)
         message = "\n".join(truncated)
 
+    any_delivered = False
+    last_err = None
     for chat_id in TELEGRAM_CHAT_IDS:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
             payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML", "disable_web_page_preview": True}
             result = requests.post(url, json=payload, timeout=10).json()
             if result.get("ok"):
+                any_delivered = True
                 print(f"Telegram sent to {chat_id}!")
             else:
+                last_err = str(result)
                 print(f"Telegram error for {chat_id}: {result}")
         except Exception as e:
+            last_err = str(e)
             print(f"Telegram failed for {chat_id}: {e}")
+    try:
+        from notifications_log import record_telegram
+        record_telegram(source='report', message=message, delivered=any_delivered, error=last_err, channel='all-orgs')
+    except Exception:
+        pass
 
 
 def main():

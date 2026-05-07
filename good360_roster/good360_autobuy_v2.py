@@ -411,6 +411,141 @@ def record_card_decline(payment_method_id: int):
 
 
 # ─── Browser Checkout ─────────────────────────────────────────────────────────
+class _DevToolsMCPUnavailable(RuntimeError):
+    """Raised when good360_devtools_agent or the openai-agents SDK can't be
+    loaded. Caller falls back to the legacy browser_agent path."""
+
+
+def _run_checkout_via_devtools_mcp(org: OrgContext, truck: TruckContext,
+                                   payment_card: dict) -> CheckoutResult:
+    """Production checkout dispatched through the Chrome DevTools MCP agent.
+
+    Builds an `org_override` dict from the QuickBeed-fetched OrgContext and
+    the operator-selected payment card, then invokes
+    good360_devtools_agent.run_agent. Maps CheckoutAgentResult onto our
+    CheckoutResult shape so the surrounding code path (DB rows, billing,
+    notifications, cooldown) is unchanged.
+
+    Live-purchase mode (dry_run=False) requires
+    DEVTOOLS_AGENT_ALLOW_LIVE_PURCHASE + DEVTOOLS_AGENT_ALLOW_SECRETS_TO_MODEL
+    to be true in Settings. The agent's _validate_purchase_context enforces
+    this — we surface the RuntimeError verbatim as a failed_checkout result
+    so the operator sees exactly which flag is missing.
+    """
+    import asyncio as _asyncio
+    import sys as _sys
+
+    # Make the repo root importable so we can pick up good360_devtools_agent.
+    for _p in ("/app", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))):
+        if _p not in _sys.path:
+            _sys.path.insert(0, _p)
+    try:
+        import good360_devtools_agent as _agent
+    except Exception as exc:
+        raise _DevToolsMCPUnavailable(f"import good360_devtools_agent failed: {exc}") from exc
+
+    # Card expiry: production stores month/year separately. The agent's prompt
+    # builder hands the card to the LLM verbatim, so we format MMYY here so
+    # the model can fill `MM / YY` checkout inputs without translation.
+    expiry_mmyy = f"{int(payment_card['card_expiry_month']):02d}{str(payment_card['card_expiry_year'])[-2:]}"
+
+    # Pick the primary warehouse + billing addresses from the QB-supplied list.
+    primary_addr = next((a for a in org.addresses if a.get("is_primary")), None) \
+                   or (org.addresses[0] if org.addresses else {})
+    warehouse_address = primary_addr.get("address1") or primary_addr.get("address") or ""
+    billing_address   = (payment_card.get("billing_zip") or "").strip()
+
+    org_override = {
+        "name":              org.org_name,
+        "good360_email":     org.good360_email,
+        "good360_password":  org.good360_password,
+        "card": {
+            "name":   payment_card.get("card_holder_name") or org.contact_name or org.org_name,
+            "number": payment_card["card_number"],
+            "expiry": expiry_mmyy,
+            "cvv":    payment_card["card_cvv"],
+            "type":   payment_card.get("card_type", "visa"),
+        },
+        "checkout_answers":  dict(org.checkout_answers or {}),
+        "warehouse_address": warehouse_address,
+        "billing_address":   billing_address,
+        "buyer_name":        org.contact_name or org.org_name,
+        "buyer_email":       org.contact_email,
+        "max_auto_pay":      float(org.max_price_override or os.environ.get("MAX_AUTO_PAY", "6400")),
+    }
+
+    # Dry-run gate: respects QUICKBEED_DRY_RUN for QB-sourced orgs (matches the
+    # existing pre-MCP behavior) so staging keeps not spending money.
+    qb_dry_run = (os.environ.get("QUICKBEED_DRY_RUN", "").lower() in ("1", "true", "yes"))
+    is_qb = getattr(org, "good360_org_id", "sentinel") is None
+    dry_run = qb_dry_run and is_qb
+
+    logger.info(
+        "[MCP] dispatching to chrome-devtools-mcp agent · org=%s truck=%s dry_run=%s card=****%s",
+        org.org_id, truck.truck_event_id, dry_run, str(payment_card["card_number"])[-4:],
+    )
+
+    try:
+        agent_result = _asyncio.run(_agent.run_agent(
+            org_key=str(org.org_id),
+            truck_name=truck.truck_title,
+            truck_url=truck.truck_url,
+            admin_fee=float(truck.truck_price or 0.0),
+            dry_run=dry_run,
+            org_override=org_override,
+        ))
+    except RuntimeError as exc:
+        # _validate_purchase_context surfaces missing safety flags / creds
+        # as RuntimeError. Translate to a failed_checkout so the surrounding
+        # retry/notification logic handles it normally.
+        return CheckoutResult(
+            success=False,
+            status="failed_checkout",
+            mode="auto_buy",
+            error_message=f"[MCP] {exc}",
+        )
+    except Exception as exc:
+        return CheckoutResult(
+            success=False,
+            status="failed_checkout",
+            mode="auto_buy",
+            error_message=f"[MCP] agent crashed: {type(exc).__name__}: {exc}",
+        )
+
+    # Map CheckoutAgentResult.status → autobuy_v2 statuses.
+    a_status = (getattr(agent_result, "status", "FAILED") or "FAILED").upper()
+    a_msg    = getattr(agent_result, "message", "") or ""
+    confirmation = getattr(agent_result, "confirmation_number", None)
+    order_total  = getattr(agent_result, "order_total", None)
+
+    if a_status == "SUCCESS":
+        return CheckoutResult(
+            success=True, status="success", mode="auto_buy",
+            confirmation_number=confirmation,
+            order_total=order_total or float(truck.truck_price or 0.0),
+            error_message=None,
+        )
+    if a_status == "DRY_RUN":
+        # Mirrors the existing dry_run synthetic-success shape.
+        return CheckoutResult(
+            success=True, status="dry_run_ok", mode="auto_buy",
+            confirmation_number=f"DRYRUN-MCP-{org.org_id}-{truck.truck_event_id}",
+            order_total=order_total or float(truck.truck_price or 0.0),
+            error_message=None,
+        )
+    if a_status == "MISSED":
+        return CheckoutResult(success=False, status="missed", mode="auto_buy",
+                             error_message=f"[MCP] {a_msg}")
+    if a_status == "MANUAL":
+        return CheckoutResult(success=False, status="manual_required", mode="auto_buy",
+                             error_message=f"[MCP] {a_msg}")
+    if a_status == "BLOCKED":
+        return CheckoutResult(success=False, status="failed_checkout", mode="auto_buy",
+                             error_message=f"[MCP] BLOCKED: {a_msg}")
+    return CheckoutResult(success=False, status="failed_checkout", mode="auto_buy",
+                         error_message=f"[MCP] {a_status}: {a_msg}")
+
+
 def run_checkout_sequence(org: OrgContext, truck: TruckContext,
                           payment_card: dict) -> CheckoutResult:
     """
@@ -451,7 +586,19 @@ def run_checkout_sequence(org: OrgContext, truck: TruckContext,
             error_message=None,
         )
 
-    # Prepare browser agent message
+    # Production checkout via Chrome DevTools MCP agent.
+    # The agent uses the QuickBeed-supplied org credentials + the per-customer
+    # payment card we just selected. Falls through to the legacy browser-agent
+    # path on import failure so production isn't dead if the SDK is missing.
+    try:
+        return _run_checkout_via_devtools_mcp(org, truck, payment_card)
+    except _DevToolsMCPUnavailable as exc:
+        logger.warning(
+            "DevTools MCP unavailable (%s) — falling back to legacy browser_agent path",
+            exc,
+        )
+
+    # Prepare browser agent message (legacy fallback, only reached if MCP import fails)
     checkout_data = {
         "good360_email":    org.good360_email,
         "good360_password": org.good360_password,

@@ -10,7 +10,7 @@ import re
 import shutil
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 UTC = timezone.utc
 from pathlib import Path
@@ -733,22 +733,45 @@ def scans_log_tail():
 COMPOSE_PROJECT = os.environ.get("COMPOSE_PROJECT_NAME", "good-360-bids")
 
 
+# Tiny TTL cache so the dashboard's 5-second poll loop doesn't fire a
+# fresh `docker compose logs` subprocess on every request. We accept a few
+# seconds of staleness in exchange for keeping the server responsive when
+# multiple operators have the dashboard open at once.
+_DOCKER_LOGS_CACHE: dict[tuple[str, int], tuple[float, list[str]]] = {}
+_DOCKER_LOGS_TTL = 3.0   # seconds
+_DOCKER_LOGS_LOCK = threading.Lock()
+
+
 def _docker_logs(service: str, n: int) -> list[str]:
-    """Read the last `n` log lines from a compose service via the docker CLI."""
+    """Read the last `n` log lines from a compose service via the docker CLI.
+    Cached for `_DOCKER_LOGS_TTL` seconds per (service, n) to avoid spawning
+    a subprocess on every dashboard poll."""
     if not shutil.which("docker"):
         return []
+    key = (service, n)
+    now = time.monotonic()
+    with _DOCKER_LOGS_LOCK:
+        cached = _DOCKER_LOGS_CACHE.get(key)
+        if cached and (now - cached[0]) < _DOCKER_LOGS_TTL:
+            return cached[1]
     try:
         proc = subprocess.run(
             ["docker", "compose", "-p", COMPOSE_PROJECT,
              "-f", "/app/docker-compose.yml", "logs",
              "--no-color", "--tail", str(n), service],
-            capture_output=True, text=True, timeout=10, cwd="/app",
+            # Tighter timeout than before — a hung docker call shouldn't
+            # take 10s to give up while users are watching the dashboard.
+            capture_output=True, text=True, timeout=4, cwd="/app",
         )
         if proc.returncode != 0:
-            return []
-        return [ln for ln in proc.stdout.splitlines() if ln.strip()]
+            lines = []
+        else:
+            lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
     except Exception:
-        return []
+        lines = []
+    with _DOCKER_LOGS_LOCK:
+        _DOCKER_LOGS_CACHE[key] = (now, lines)
+    return lines
 
 
 def _read_last_lines(path: str, n: int) -> list[str]:
@@ -833,29 +856,415 @@ def _docker_service_states(names: list[str]) -> list[dict]:
         return [{"name": n, "state": "unknown", "running": None} for n in names]
 
 
+ROSTER_DB_PATH = os.environ.get(
+    "ROSTER_DB_PATH",
+    "/app/good360_roster/db/roster.db",
+)
+
+
+def _roster_purchase_rows(where_sql: str = "", params: tuple = (), limit: int = 200,
+                          days: int | None = None) -> list[dict]:
+    """Read joined purchase_attempts + truck_events + nonprofits rows from
+    roster.db. Returns rows shaped to the existing /api/admin/purchases
+    contract (ts, org_id, truck, total, status, detail) so the UI doesn't
+    care that the source switched from JSONL to SQL.
+
+    `where_sql` lets callers filter (e.g. by quickbeed_customer_id). It must
+    start with "AND" if non-empty. Empty rows are returned as-is when
+    roster.db is unreachable so the UI can render an empty state instead
+    of a 500."""
+    import sqlite3 as _sqlite
+    if not os.path.exists(ROSTER_DB_PATH):
+        return []
+    where_parts = ["1=1"]
+    if days and days > 0:
+        where_parts.append("pa.started_at >= datetime('now', ?)")
+        params = (*params, f"-{days} day")
+    if where_sql:
+        where_parts.append(where_sql)
+    where = " AND ".join(where_parts)
+    sql = f"""
+        SELECT
+            pa.id                  AS attempt_id,
+            COALESCE(pa.completed_at, pa.started_at) AS ts,
+            pa.started_at          AS started_at,
+            pa.completed_at        AS completed_at,
+            pa.status              AS status,
+            pa.mode                AS mode,
+            pa.attempt_number      AS attempt_number,
+            pa.error_message       AS error_message,
+            pa.screenshot_path     AS screenshot_path,
+            pa.confirmation_number AS confirmation_number,
+            pa.order_total         AS order_total,
+            pa.cooldown_applied    AS cooldown_applied,
+            te.truck_title         AS truck_title,
+            te.truck_url           AS truck_url,
+            te.truck_price         AS truck_price,
+            np.org_name            AS org_name,
+            np.contact_email       AS org_email,
+            np.quickbeed_customer_id AS quickbeed_customer_id
+        FROM purchase_attempts pa
+        LEFT JOIN truck_events te ON te.id = pa.truck_event_id
+        LEFT JOIN nonprofits   np ON np.id = pa.nonprofit_id
+        WHERE {where}
+        ORDER BY COALESCE(pa.completed_at, pa.started_at) DESC
+        LIMIT ?
+    """
+    try:
+        conn = _sqlite.connect(ROSTER_DB_PATH, timeout=5.0)
+        conn.row_factory = _sqlite.Row
+        rows = conn.execute(sql, (*params, limit)).fetchall()
+        conn.close()
+    except _sqlite.Error:
+        return []
+
+    out: list[dict] = []
+    for r in rows:
+        d = dict(r)
+        # UI-compatible aliases (keep the rich fields too)
+        d["ts"]      = d.get("ts") or d.get("started_at")
+        d["org_id"]  = d.get("org_name") or "—"
+        d["truck"]   = d.get("truck_title") or "—"
+        d["total"]   = d.get("order_total") if d.get("order_total") is not None else d.get("truck_price")
+        d["detail"]  = d.get("error_message") or d.get("confirmation_number") or ""
+        # Drop nothing — caller can pick. Some keys (like 'event') are absent
+        # since the JSONL layer used 'event' to disambiguate; the SQL layer
+        # uses 'status' which is more precise.
+        out.append(d)
+    return out
+
+
 @bp.route("/api/admin/purchases", methods=["GET"])
 @auth.login_required
 def admin_purchases():
-    """Purchase attempts: pass + fail. Reads append-only audit JSONL files."""
-    limit = request.args.get("limit", 200, type=int)
+    """Purchase attempts: pass + fail.
+
+    Reads from `purchase_attempts` in roster.db (the source-of-truth that
+    autobuy_v2 writes to on every attempt), joining truck_events for the
+    truck title and nonprofits for the org name. Returns rows in the same
+    shape the dashboard's older JSONL-backed view used, so existing JS
+    keeps rendering without a rewrite."""
+    limit = max(1, min(request.args.get("limit", 200, type=int), 1000))
     days = request.args.get("days", 14, type=int)
-    entries = _read_audit(days_back=days)
-    purchases = [e for e in entries if e.get("event", "").startswith("purchase")]
-    purchases.sort(key=lambda e: e.get("ts", ""), reverse=True)
-    return jsonify({"success": True, "data": purchases[:limit]})
+    rows = _roster_purchase_rows(limit=limit, days=days)
+    return jsonify({"success": True, "data": rows})
 
 
 @bp.route("/api/admin/audit", methods=["GET"])
 @auth.super_admin_required
 def admin_audit_log():
-    """Dashboard's own admin-action audit (separate from purchase audit)."""
-    limit = request.args.get("limit", 200, type=int)
+    """Dashboard's own admin-action audit (separate from purchase audit).
+
+    Query params:
+      limit  — cap rows (default 500, max 5000)
+      days   — only return entries from the last N days; omit for all-time
+    """
+    limit = max(1, min(request.args.get("limit", 500, type=int), 5000))
+    days = request.args.get("days", type=int)
+    where = ""
+    params: list = []
+    if days and days > 0:
+        # admin_audit.ts is stored as 'YYYY-MM-DD HH:MM:SS' (sqlite datetime('now'))
+        where = " WHERE ts >= datetime('now', ?)"
+        params.append(f"-{days} day")
+    params.append(limit)
     with get_conn() as c:
         rows = c.execute(
-            "SELECT * FROM admin_audit ORDER BY id DESC LIMIT ?",
-            (limit,),
+            f"SELECT * FROM admin_audit{where} ORDER BY id DESC LIMIT ?",
+            params,
         ).fetchall()
-    return jsonify({"success": True, "data": [dict(r) for r in rows]})
+        # Distinct user emails for the filter dropdown
+        users = c.execute(
+            "SELECT DISTINCT user_email FROM admin_audit "
+            "WHERE user_email IS NOT NULL ORDER BY user_email"
+        ).fetchall()
+    return jsonify({
+        "success": True,
+        "data": [dict(r) for r in rows],
+        "users": [u["user_email"] for u in users],
+    })
+
+
+@bp.route("/api/admin/analytics", methods=["GET"])
+@auth.login_required
+def admin_analytics():
+    """Aggregated insights from the data the system actually captures.
+
+    Sources used (and their honest limits):
+      - good360_run_log.json: scans + per-scan trucks[]. No org_id / no
+        login_ok in this file — those weren't being captured by the monitor.
+      - audit JSONL: purchases. No code currently writes purchase events
+        (the audit() helper exists but isn't called). Always returns zeros
+        until that wiring lands.
+      - dashboard.db `notifications`: every outbound Telegram alert, with
+        delivery status. Captures only post-rebuild events.
+      - dashboard.db `customers`: status + autobuy + cooldown snapshot.
+
+    Range param: ?days=7|30|90|365 (default 30). Truncates each series to
+    that window so the response stays small even on a long-lived install.
+    """
+    from collections import Counter, defaultdict
+    days = max(1, min(request.args.get("days", 30, type=int), 365))
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+
+    # ---------- scans + trucks ---------------------------------------------
+    rl = _safe_json(RUN_LOG)
+    raw_runs = rl.get("runs", rl) if isinstance(rl, dict) else (rl or [])
+
+    def _parse_run_time(s):
+        # Run log writes "YYYY-MM-DD HH:MM:SS" in local time. Treat as naive
+        # UTC for windowing — small skew vs ET is acceptable here.
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return None
+
+    runs = []
+    for r in raw_runs:
+        ts = _parse_run_time(r.get("time"))
+        if ts and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        if ts is None or ts < cutoff:
+            continue
+        runs.append({"ts": ts, "raw": r})
+
+    scan_count = len(runs)
+    truck_observations = sum(len(r["raw"].get("trucks") or []) for r in runs)
+    availability_events = sum(
+        sum(1 for t in (r["raw"].get("trucks") or []) if t.get("available"))
+        for r in runs
+    )
+    alerts_sent = sum(1 for r in runs if r["raw"].get("alert_sent"))
+
+    # Actual span of the data (may be much narrower than the requested window
+    # if the monitor is new). The UI uses this to avoid claims like
+    # "200 scans over 30 days" when really the 200 scans are concentrated
+    # in a 3-hour window today.
+    data_first = runs[0]["ts"].isoformat() if runs else None
+    data_last = runs[-1]["ts"].isoformat() if runs else None
+    data_span_seconds = (
+        int((runs[-1]["ts"] - runs[0]["ts"]).total_seconds()) if len(runs) > 1 else 0
+    )
+    avail_rate_pct = round(availability_events / truck_observations * 100, 2) if truck_observations else 0.0
+
+    scans_per_day = Counter()
+    avail_per_day = Counter()
+    alerts_per_day = Counter()
+    scans_per_hour = Counter()
+    truck_observed = Counter()
+    truck_available = Counter()
+
+    for r in runs:
+        d = r["ts"].strftime("%Y-%m-%d")
+        scans_per_day[d] += 1
+        scans_per_hour[r["ts"].hour] += 1
+        if r["raw"].get("alert_sent"):
+            alerts_per_day[d] += 1
+        for t in (r["raw"].get("trucks") or []):
+            name = (t.get("name") or "unknown").strip()
+            truck_observed[name] += 1
+            if t.get("available"):
+                truck_available[name] += 1
+                avail_per_day[d] += 1
+
+    # ---------- log-severity (last N log lines) -----------------------------
+    log_lines = _docker_logs("monitor", 1000) or _read_last_lines(CRON_LOG, 1000)
+    log_errors = log_warns = log_ok = 0
+    for raw in log_lines:
+        line = raw.split(" | ", 1)[1] if " | " in raw[:40] else raw
+        u = line.upper()
+        if "ERROR" in u or "FAIL" in u or "TRACEBACK" in u or "❌" in line:
+            log_errors += 1
+        elif "WARN" in u or "MISSED" in u or "⚠" in line:
+            log_warns += 1
+        elif "✅" in line or " SUCCESS" in u or "PURCHASED" in u:
+            log_ok += 1
+
+    # ---------- notifications -----------------------------------------------
+    notif_per_day_level = defaultdict(lambda: {"info": 0, "warn": 0, "error": 0, "success": 0})
+    notif_total = notif_delivered = 0
+    with get_conn() as c:
+        notifs = c.execute(
+            f"SELECT ts, level, delivered FROM notifications "
+            f"WHERE ts >= ? ORDER BY ts ASC",
+            (cutoff.isoformat(timespec="seconds"),),
+        ).fetchall()
+        cust_rows = c.execute(
+            "SELECT status, in_rotation, cooldown_until FROM customers"
+        ).fetchall()
+        # Total customer count is independent of the time window.
+
+    for n in notifs:
+        ts_str = n["ts"]
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            d = ts.strftime("%Y-%m-%d")
+        except (ValueError, AttributeError):
+            d = "unknown"
+        lvl = (n["level"] or "info").lower()
+        if lvl not in notif_per_day_level[d]:
+            lvl = "info"
+        notif_per_day_level[d][lvl] += 1
+        notif_total += 1
+        if n["delivered"]:
+            notif_delivered += 1
+
+    # ---------- customers summary -------------------------------------------
+    cust_by_status = Counter()
+    in_rotation = paused = cooling = 0
+    now_iso = datetime.now(UTC).isoformat()
+    for c_ in cust_rows:
+        cust_by_status[c_["status"] or "unknown"] += 1
+        if c_["in_rotation"]:
+            in_rotation += 1
+        else:
+            paused += 1
+        if c_["cooldown_until"] and c_["cooldown_until"] > now_iso:
+            cooling += 1
+
+    # ---------- purchases ---------------------------------------------------
+    # Source-of-truth: roster.db.purchase_attempts (joined with truck_events
+    # + nonprofits). Populated by autobuy_v2 on every attempt.
+    purchases = _roster_purchase_rows(days=days, limit=10_000)
+    purch_ok = sum(1 for p in purchases if (p.get("status") or "").lower() in ("success", "dry_run_ok"))
+    purch_fail = sum(1 for p in purchases
+                     if (p.get("status") or "").lower().startswith("fail")
+                        or (p.get("status") or "").lower() in ("error", "missed", "manual_required"))
+    purch_spend = sum(float(p.get("order_total") or 0) for p in purchases
+                      if (p.get("status") or "").lower() == "success")
+
+    # ---------- shape series for charts -------------------------------------
+    # Dense day list so the chart shows zero days as zero, not gaps.
+    day_keys = []
+    for i in range(days):
+        d = (datetime.now(UTC) - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d")
+        day_keys.append(d)
+
+    series_scans = [{"date": d, "n": scans_per_day.get(d, 0)} for d in day_keys]
+    series_avail = [{"date": d, "n": avail_per_day.get(d, 0)} for d in day_keys]
+    series_alerts = [{"date": d, "n": alerts_per_day.get(d, 0)} for d in day_keys]
+    series_hour = [{"hour": h, "n": scans_per_hour.get(h, 0)} for h in range(24)]
+    series_notifs = [{
+        "date": d,
+        "info":    notif_per_day_level[d]["info"],
+        "warn":    notif_per_day_level[d]["warn"],
+        "error":   notif_per_day_level[d]["error"],
+        "success": notif_per_day_level[d]["success"],
+    } for d in day_keys]
+
+    # Trucks ranked by absolute availability count (more useful than rate
+    # alone — a 100% rate on 1 observation is noise).
+    trucks_table = []
+    for name, observed in truck_observed.most_common(20):
+        avail = truck_available.get(name, 0)
+        trucks_table.append({
+            "name": name,
+            "observed": observed,
+            "available": avail,
+            "rate": round(avail / observed * 100, 1) if observed else 0.0,
+        })
+    trucks_table.sort(key=lambda r: (r["available"], r["rate"]), reverse=True)
+
+    return jsonify({
+        "success": True,
+        "data": {
+            "range_days": days,
+            "data_first": data_first,
+            "data_last": data_last,
+            "data_span_seconds": data_span_seconds,
+            "kpi": {
+                "scan_count": scan_count,
+                "truck_observations": truck_observations,
+                "availability_events": availability_events,
+                "availability_rate_pct": avail_rate_pct,
+                "alerts_sent": alerts_sent,
+                "log_errors": log_errors,
+                "log_warns": log_warns,
+                "log_ok": log_ok,
+                "notifications_total": notif_total,
+                "notifications_delivered": notif_delivered,
+                "purchases_ok": purch_ok,
+                "purchases_fail": purch_fail,
+                "purchases_spend": purch_spend,
+            },
+            "series": {
+                "scans_per_day": series_scans,
+                "availability_per_day": series_avail,
+                "alerts_per_day": series_alerts,
+                "scans_per_hour": series_hour,
+                "notifications_per_day": series_notifs,
+            },
+            "trucks": trucks_table,
+            "customers": {
+                "total": sum(cust_by_status.values()),
+                "by_status": dict(cust_by_status),
+                "in_rotation": in_rotation,
+                "paused": paused,
+                "cooling_off": cooling,
+            },
+            "data_gaps": [
+                # Be explicit about what we CAN'T compute, so the UI can
+                # surface it instead of pretending the answer is zero.
+                "Run log doesn't capture login_ok / org_id, so per-org login "
+                "health and per-org scan attribution can't be charted yet.",
+                # Note: purchase_attempts in roster.db is now the canonical
+                # source for buy attempts/totals. If purchase counts read 0
+                # but autobuy fired, check that autobuy_v2 wrote rows there.
+            ],
+        },
+    })
+
+
+@bp.route("/api/admin/notifications", methods=["GET"])
+@auth.login_required
+def admin_notifications():
+    """Telegram notifications mirror. Every outbound alert recorded by
+    notifications_log.record_telegram() shows up here for the operator.
+
+    Query params:
+      limit  — max rows (default 200, capped at 1000)
+      level  — filter by 'info'|'warn'|'error'|'success' (optional)
+      source — filter by 'monitor'|'autobuy'|'watchdog'|'report'|'deadman'
+    """
+    limit  = max(1, min(request.args.get("limit", 200, type=int), 1000))
+    level  = (request.args.get("level") or "").strip().lower()
+    source = (request.args.get("source") or "").strip().lower()
+
+    where = []
+    params: list = []
+    if level in ("info", "warn", "error", "success"):
+        where.append("level = ?")
+        params.append(level)
+    if source:
+        where.append("source = ?")
+        params.append(source)
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    params.append(limit)
+
+    with get_conn() as c:
+        rows = c.execute(
+            f"SELECT id, ts, source, level, channel, title, message, delivered, error "
+            f"FROM notifications {where_sql} ORDER BY id DESC LIMIT ?",
+            params,
+        ).fetchall()
+        # Summary counters for the dashboard's metric strip.
+        summary = c.execute(
+            "SELECT level, COUNT(*) AS n FROM notifications "
+            "WHERE ts >= datetime('now', '-7 day') GROUP BY level"
+        ).fetchall()
+
+    return jsonify({
+        "success": True,
+        "data": [dict(r) for r in rows],
+        "summary": {row["level"]: int(row["n"]) for row in summary},
+    })
 
 
 def _safe_json(path: str):
@@ -1028,6 +1437,376 @@ def customer_detail(customer_id):
     if not row:
         return jsonify({"success": False, "error": "not found"}), 404
     return jsonify({"success": True, "data": dict(row)})
+
+
+@bp.route("/api/admin/roster/queue", methods=["GET"])
+@auth.login_required
+def roster_queue():
+    """Snapshot of the round-robin: who's next up, who got the last buy, and
+    who's currently in cool-off. Mirrors the eligibility logic used by
+    quickbeed.list_eligible_customers / select_next_round_robin."""
+    with get_conn() as c:
+        # Eligible queue, least-recently-used first (matches quickbeed.py).
+        eligible = c.execute(
+            """SELECT id, organization_name, full_name, priority_level, max_budget,
+                      last_used_at, last_purchase_at, cooldown_until, status, in_rotation
+                 FROM customers
+                WHERE status = 'active'
+                  AND in_rotation = 1
+                  AND (cooldown_until IS NULL OR cooldown_until < datetime('now'))
+                ORDER BY COALESCE(last_used_at, '1970-01-01') ASC, id ASC
+                LIMIT 5"""
+        ).fetchall()
+
+        last = c.execute(
+            """SELECT id, organization_name, full_name, last_purchase_at, last_used_at
+                 FROM customers
+                WHERE last_purchase_at IS NOT NULL
+                ORDER BY last_purchase_at DESC LIMIT 1"""
+        ).fetchone()
+
+        cooldowns = c.execute(
+            """SELECT id, organization_name, full_name, cooldown_until, last_used_at,
+                      last_purchase_at, status, in_rotation
+                 FROM customers
+                WHERE cooldown_until IS NOT NULL AND cooldown_until >= datetime('now')
+                ORDER BY cooldown_until ASC"""
+        ).fetchall()
+
+        # Counts for the small meta line in the UI.
+        eligible_total = c.execute(
+            """SELECT COUNT(*) AS n FROM customers
+                WHERE status = 'active' AND in_rotation = 1
+                  AND (cooldown_until IS NULL OR cooldown_until < datetime('now'))"""
+        ).fetchone()["n"]
+        paused_total = c.execute(
+            """SELECT COUNT(*) AS n FROM customers
+                WHERE status = 'active' AND in_rotation = 0"""
+        ).fetchone()["n"]
+
+    queue = [dict(r) for r in eligible]
+    return jsonify({
+        "success": True,
+        "data": {
+            "next": queue[0] if queue else None,
+            "queue": queue,
+            "last_purchase": dict(last) if last else None,
+            "cooldowns": [dict(r) for r in cooldowns],
+            "summary": {
+                "eligible_total": int(eligible_total),
+                "paused_total": int(paused_total),
+                "cooldown_total": len(cooldowns),
+            },
+        },
+    })
+
+
+@bp.route("/api/admin/login-attempts", methods=["GET"])
+@auth.login_required
+def list_login_attempts():
+    """Recent Good360 login attempts captured by login_telemetry.
+    Used by the Scans page's 'Login health' panel."""
+    limit = max(1, min(request.args.get("limit", 50, type=int), 500))
+    with get_conn() as c:
+        rows = c.execute(
+            "SELECT id, ts, source, email, success, duration_ms, error "
+            "FROM good360_login_attempts ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        # Summary over the last 24h for the metric strip.
+        summary = c.execute(
+            "SELECT COUNT(*) AS total, "
+            "       SUM(CASE WHEN success=1 THEN 1 ELSE 0 END) AS ok "
+            "FROM good360_login_attempts WHERE ts >= datetime('now','-1 day')"
+        ).fetchone()
+    rows_d = [dict(r) for r in rows]
+    last_ok = next((r for r in rows_d if r["success"]), None)
+    last_fail = next((r for r in rows_d if not r["success"]), None)
+    return jsonify({
+        "success": True,
+        "data": rows_d,
+        "summary": {
+            "total_24h": int(summary["total"] or 0),
+            "ok_24h":    int(summary["ok"] or 0),
+            "last_ok":   last_ok,
+            "last_fail": last_fail,
+        },
+    })
+
+
+@bp.route("/api/admin/test-runs", methods=["GET"])
+@auth.super_admin_required
+def list_test_runs():
+    """Recent admin-triggered checkout test runs."""
+    limit = max(1, min(request.args.get("limit", 200, type=int), 1000))
+    with get_conn() as c:
+        rows = c.execute(
+            "SELECT id, ts, started_at, finished_at, status, customer_name, customer_email, "
+            "truck_url, card_brand, card_last4, result_summary, error, screenshot_path "
+            "FROM test_runs ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return jsonify({"success": True, "data": [dict(r) for r in rows]})
+
+
+_CARD_BRAND_RE = [
+    ("visa",       re.compile(r"^4")),
+    ("mastercard", re.compile(r"^(5[1-5]|2[2-7])")),
+    ("amex",       re.compile(r"^(34|37)")),
+    ("discover",   re.compile(r"^6(011|5)")),
+]
+
+
+def _classify_card(pan: str) -> str:
+    digits = re.sub(r"\D", "", pan or "")
+    for brand, rx in _CARD_BRAND_RE:
+        if rx.match(digits):
+            return brand
+    return "unknown"
+
+
+@bp.route("/api/admin/test-runs", methods=["POST"])
+@auth.super_admin_required
+def create_test_run():
+    """Submit a new checkout test. PAN + CVV are read once for the runner
+    and never persisted — only brand + last4 are stored in the audit row."""
+    data = request.get_json(silent=True) or {}
+    name = (data.get("customer_name") or "").strip()
+    email = (data.get("customer_email") or "").strip()
+    truck_url = (data.get("truck_url") or "").strip() or None
+    pan = re.sub(r"\D", "", (data.get("card_number") or ""))
+    expiry = re.sub(r"\D", "", (data.get("card_expiry") or ""))
+    cvv = re.sub(r"\D", "", (data.get("card_cvv") or ""))
+    # live_submit=true → dry_run=false (agent will click Place Order).
+    # Default off so accidental clicks are non-destructive.
+    live_submit = bool(data.get("live_submit"))
+
+    errors: list[str] = []
+    if not name:  errors.append("customer_name is required")
+    if not email or "@" not in email: errors.append("customer_email must be a valid email")
+    if not (12 <= len(pan) <= 19): errors.append("card_number must be 12–19 digits")
+    if len(expiry) not in (4, 6): errors.append("card_expiry must be MMYY or MMYYYY")
+    if not (3 <= len(cvv) <= 4): errors.append("card_cvv must be 3 or 4 digits")
+    if errors:
+        return jsonify({"success": False, "error": "; ".join(errors)}), 400
+
+    brand = _classify_card(pan)
+    last4 = pan[-4:]
+    u = auth.current_user() or {}
+
+    with get_conn() as c:
+        cur = c.execute(
+            """INSERT INTO test_runs
+                 (status, customer_name, customer_email, truck_url,
+                  card_brand, card_last4, result_summary, created_by_user_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "queued",
+                name, email, truck_url, brand, last4,
+                "queued — runner will start when the lock is free",
+                u.get("id"),
+            ),
+        )
+        new_id = cur.lastrowid
+        c.execute(
+            "INSERT INTO admin_audit(user_id, user_email, action, target, detail, ip) "
+            "VALUES (?,?,?,?,?,?)",
+            (u.get("id"), u.get("email"), "test_run.create",
+             f"test_run:{new_id}",
+             f"customer={name!r} card={brand}/{last4} truck={truck_url or 'auto'}",
+             request.remote_addr),
+        )
+        row = c.execute(
+            "SELECT id, ts, status, customer_name, customer_email, truck_url, "
+            "card_brand, card_last4, result_summary FROM test_runs WHERE id = ?",
+            (new_id,),
+        ).fetchone()
+
+    # Spawn the Playwright runner in a background thread. The PAN + CVV are
+    # passed by value into the thread closure; they're never persisted and
+    # go out of scope when the thread exits.
+    try:
+        import test_runner  # type: ignore
+        t = threading.Thread(
+            target=test_runner.run_in_background,
+            kwargs=dict(
+                test_id=new_id,
+                customer_name=name,
+                customer_email=email,
+                truck_url=truck_url,
+                card_number=pan,
+                card_expiry=expiry,
+                card_cvv=cvv,
+                dry_run=not live_submit,
+            ),
+            daemon=True,
+            name=f"test_runner_{new_id}",
+        )
+        t.start()
+    except Exception as exc:  # pragma: no cover — defensive
+        with get_conn() as c:
+            c.execute(
+                "UPDATE test_runs SET status=?, error=? WHERE id=?",
+                ("failed", f"failed to spawn runner: {exc}", new_id),
+            )
+
+    # Local pan/cvv references go out of scope at function exit.
+    del pan, cvv
+    return jsonify({"success": True, "data": dict(row)})
+
+
+@bp.route("/api/admin/test-runs/<int:test_id>", methods=["GET"])
+@auth.super_admin_required
+def get_test_run(test_id):
+    """Full detail for one test run, with the audit trail attached."""
+    with get_conn() as c:
+        row = c.execute(
+            "SELECT id, ts, started_at, finished_at, status, customer_name, customer_email, "
+            "truck_url, card_brand, card_last4, result_summary, error, screenshot_path, "
+            "created_by_user_id "
+            "FROM test_runs WHERE id = ?",
+            (test_id,),
+        ).fetchone()
+        if not row:
+            return jsonify({"success": False, "error": "not found"}), 404
+        # Audit entries that reference this test, if any.
+        events = c.execute(
+            "SELECT ts, user_email, action, detail FROM admin_audit "
+            "WHERE target = ? ORDER BY id ASC",
+            (f"test_run:{test_id}",),
+        ).fetchall()
+    data = dict(row)
+    data["audit"] = [dict(e) for e in events]
+    return jsonify({"success": True, "data": data})
+
+
+@bp.route("/api/admin/test-runs/<int:test_id>/screenshot", methods=["GET"])
+@auth.super_admin_required
+def get_test_run_screenshot(test_id):
+    """Stream the screenshot taken at the end of the run.
+    Validates that the recorded path stays within the screenshots dir so a
+    crafted DB row can't trick us into reading arbitrary files."""
+    with get_conn() as c:
+        row = c.execute(
+            "SELECT screenshot_path FROM test_runs WHERE id = ?",
+            (test_id,),
+        ).fetchone()
+    if not row or not row["screenshot_path"]:
+        return jsonify({"success": False, "error": "no screenshot"}), 404
+
+    workdir = Path(WORKDIR).resolve()
+    shots = (workdir / "test_run_screenshots").resolve()
+    requested = (workdir / row["screenshot_path"]).resolve()
+    try:
+        requested.relative_to(shots)
+    except ValueError:
+        return jsonify({"success": False, "error": "invalid path"}), 400
+    if not requested.exists():
+        return jsonify({"success": False, "error": "file missing"}), 404
+    return Response(requested.read_bytes(), mimetype="image/png",
+                    headers={"Cache-Control": "private, max-age=60"})
+
+
+@bp.route("/api/admin/test-runs/<int:test_id>", methods=["DELETE"])
+@auth.super_admin_required
+def delete_test_run(test_id):
+    u = auth.current_user() or {}
+    with get_conn() as c:
+        row = c.execute("SELECT id FROM test_runs WHERE id = ?", (test_id,)).fetchone()
+        if not row:
+            return jsonify({"success": False, "error": "not found"}), 404
+        c.execute("DELETE FROM test_runs WHERE id = ?", (test_id,))
+        c.execute(
+            "INSERT INTO admin_audit(user_id, user_email, action, target, detail, ip) "
+            "VALUES (?,?,?,?,?,?)",
+            (u.get("id"), u.get("email"), "test_run.delete",
+             f"test_run:{test_id}", "deleted", request.remote_addr),
+        )
+    return jsonify({"success": True})
+
+
+@bp.route("/api/admin/customers/<customer_id>/purchases", methods=["GET"])
+@auth.login_required
+def customer_purchases(customer_id):
+    """Buy history for a single customer. Reads roster.db.purchase_attempts
+    joined to truck_events + nonprofits, filtered to rows whose nonprofit
+    has quickbeed_customer_id == customer_id."""
+    days = request.args.get("days", 90, type=int)
+    limit = max(1, min(request.args.get("limit", 200, type=int), 1000))
+
+    with get_conn() as c:
+        row = c.execute(
+            "SELECT id, organization_name FROM customers WHERE id = ?",
+            (customer_id,),
+        ).fetchone()
+    if not row:
+        return jsonify({"success": False, "error": "not found"}), 404
+
+    purchases = _roster_purchase_rows(
+        where_sql="np.quickbeed_customer_id = ?",
+        params=(customer_id,),
+        days=days,
+        limit=limit,
+    )
+
+    def _is_ok(p):
+        return (p.get("status") or "").lower() in ("success", "dry_run_ok")
+    def _is_fail(p):
+        s = (p.get("status") or "").lower()
+        return s.startswith("fail") or s in ("error", "missed", "manual_required")
+
+    ok = sum(1 for p in purchases if _is_ok(p))
+    fail = sum(1 for p in purchases if _is_fail(p))
+    total_spend = sum(
+        float(p.get("total") or 0)
+        for p in purchases
+        if _is_ok(p)
+    )
+
+    return jsonify({
+        "success": True,
+        "data": purchases[:limit],
+        "summary": {"ok": ok, "fail": fail, "total_spend": total_spend, "days": days},
+    })
+
+
+@bp.route("/api/admin/customers/<customer_id>/rotation", methods=["PATCH"])
+@auth.super_admin_required
+def customer_set_rotation(customer_id):
+    """Toggle whether this customer participates in the autobuy round-robin.
+    Maps to the local `in_rotation` flag — purchase eligibility is
+    `status == 'active' AND in_rotation = 1 AND no active cooldown`.
+    """
+    data = request.get_json(silent=True) or {}
+    if "in_rotation" not in data:
+        return jsonify({"success": False, "error": "missing in_rotation"}), 400
+    new_val = 1 if bool(data["in_rotation"]) else 0
+    u = auth.current_user() or {}
+
+    with get_conn() as c:
+        row = c.execute("SELECT id, organization_name, in_rotation FROM customers WHERE id = ?",
+                        (customer_id,)).fetchone()
+        if not row:
+            return jsonify({"success": False, "error": "not found"}), 404
+        old_val = int(row["in_rotation"] or 0)
+        if old_val == new_val:
+            updated = c.execute("SELECT * FROM customers WHERE id = ?", (customer_id,)).fetchone()
+            return jsonify({"success": True, "data": dict(updated), "no_change": True})
+        c.execute("UPDATE customers SET in_rotation = ? WHERE id = ?", (new_val, customer_id))
+        c.execute(
+            "INSERT INTO admin_audit(user_id, user_email, action, target, detail, ip) "
+            "VALUES (?,?,?,?,?,?)",
+            (
+                u.get("id"),
+                u.get("email"),
+                "customer.rotation",
+                f"customer:{customer_id}",
+                f"in_rotation {old_val} → {new_val} ({row['organization_name'] or 'unnamed'})",
+                request.remote_addr,
+            ),
+        )
+        updated = c.execute("SELECT * FROM customers WHERE id = ?", (customer_id,)).fetchone()
+    return jsonify({"success": True, "data": dict(updated)})
 
 
 @bp.route("/api/admin/customers/<customer_id>/live", methods=["GET"])

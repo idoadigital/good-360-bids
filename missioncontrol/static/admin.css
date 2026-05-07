@@ -1253,32 +1253,1217 @@ dl.kv-grid dd.mono {
     .setting-group.span-2 { grid-column: auto; }
 }
 
+/* ============================================================
+   MOBILE / TABLET RESPONSIVE PASS
+   App is used on phones 99% of the time, so this section is the
+   primary design target — desktop is the affordance, mobile is
+   the product.
+   ============================================================ */
+
 @media (max-width: 760px) {
+
+    /* ---- App shell: single column, sidebar pinned to bottom ---- */
     .app-shell { grid-template-columns: 1fr; }
+
     .sidebar {
         position: fixed;
         bottom: 0;
         left: 0;
         right: 0;
         top: auto;
+        width: 100%;
         height: auto;
         flex-direction: row;
-        z-index: 10;
+        align-items: stretch;
+        z-index: 50;
         border-right: none;
         border-top: 1px solid var(--border);
+        padding: 0;
+        background: var(--surface);
+        box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.4);
+        /* Honor iOS safe-area inset so the bar doesn't overlap the home gesture */
+        padding-bottom: env(safe-area-inset-bottom, 0);
     }
     .sidebar-brand, .sidebar-section-label, .sidebar-footer { display: none; }
+
     .sidebar-nav {
+        flex: 1;
         flex-direction: row;
-        padding: 8px;
+        padding: 4px 2px;
+        gap: 0;
+        justify-content: space-around;
         overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+    .sidebar-nav::-webkit-scrollbar { display: none; }
+
+    .nav-item {
+        flex-direction: column;
+        gap: 2px;
+        padding: 8px 6px;
+        min-width: 64px;
+        flex: 1 1 0;
+        font-size: 10px;
+        border-radius: 0;
+        opacity: 0.65;
+        position: relative;
+    }
+    .nav-item .icon { width: 22px; height: 22px; }
+    .nav-item > span:not(.icon):not(.badge) {
+        font-size: 10px;
+        line-height: 1;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+    }
+    .nav-item .badge { display: none; }
+    .nav-item.active {
+        opacity: 1;
+        color: var(--primary);
+        background: rgba(239, 35, 60, 0.08);
     }
     .nav-item.active::before { display: none; }
-    .content { padding: var(--space-2); padding-bottom: 100px; }
-    .panel-header h1 { font-size: 24px; }
+    .nav-item.active::after {
+        content: '';
+        position: absolute;
+        top: 0; left: 20%; right: 20%;
+        height: 2px;
+        background: var(--primary);
+    }
+
+    /* ---- Topbar tightening ---- */
+    .topbar {
+        padding: 0 var(--space-2);
+        height: 52px;
+    }
+    .crumbs { font-size: 11px; gap: 6px; }
+    .crumbs strong { display: none; }       /* hide brand on phone */
+    .crumbs .sep { display: none; }
+    .system-status {
+        padding: 4px 10px;
+        font-size: 10px;
+        gap: 6px;
+    }
+
+    /* ---- Content padding (leave room for bottom nav) ---- */
+    .content {
+        padding: var(--space-2);
+        padding-bottom: calc(72px + env(safe-area-inset-bottom, 0));
+        max-width: 100%;
+    }
+
+    /* ---- Panel header stacks ---- */
+    .panel-header {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 12px;
+        margin-bottom: var(--space-2);
+    }
+    .panel-header h1 { font-size: 22px; }
+    .panel-header .lede { font-size: 13px; margin-top: 4px; }
+    .panel-actions { justify-content: flex-start; }
+
+    /* ---- Surface cards: less inner padding, head wraps gracefully ---- */
+    .surface-card { border-radius: 12px; }
+    .surface-card-head {
+        padding: 12px var(--space-2);
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+    .surface-card-head h2 { font-size: 13px; }
+    .surface-card-body { padding: var(--space-2); }
+
+    /* ---- Metric grid: 2-up on small tablet, single col on phone ---- */
+    .metric-grid {
+        grid-template-columns: 1fr 1fr;
+        gap: var(--space-1);
+    }
+    .metric-card {
+        padding: 14px;
+        border-radius: 12px;
+    }
+    .metric-card .label { margin-bottom: 4px; font-size: 10px; }
+    .metric-card .value { font-size: 20px; }
+    .metric-card .meta { margin-top: 6px; font-size: 10px; line-height: 1.3; }
+    .metric-card:hover { transform: none; }   /* hover lift looks weird from a tap */
+
+    /* ---- Tables → labeled cards ----
+       The pattern: hide <thead>, make every cell display:flex with the
+       data-label injected as ::before. Each <tr> becomes a card. */
+    table.data,
+    table.data thead,
+    table.data tbody,
+    table.data tr,
+    table.data td {
+        display: block;
+        width: 100%;
+    }
+    table.data { border-collapse: separate; }
+    table.data thead { display: none; }
+    table.data tbody tr {
+        padding: 12px var(--space-2);
+        border-bottom: 1px solid var(--border);
+    }
+    table.data tbody tr:last-child { border-bottom: none; }
+    table.data tbody tr:hover { background: transparent; }
+    table.data td {
+        padding: 5px 0;
+        border-bottom: none;
+        text-align: left;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: var(--space-2);
+        min-height: 22px;
+    }
+    table.data td::before {
+        content: attr(data-label);
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--text-mute);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        flex-shrink: 0;
+    }
+    /* Don't render the empty pseudo for cells without a label */
+    table.data td:not([data-label])::before,
+    table.data td[data-label=""]::before { content: ''; }
+    table.data td.actions { justify-content: flex-end; padding-top: 10px; }
+    table.data td.mono { font-size: 12px; }
+
+    /* Cells whose value can be long (truck title, detail) get full-width
+       wrap below the label rather than squeezing onto one line. */
+    table.data td[data-label="Truck"],
+    table.data td[data-label="Detail"],
+    table.data td[data-label="Org"],
+    table.data td[data-label="Target"] {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 2px;
+    }
+
+    /* Empty-state cells (used colspan, no label) take full width as text. */
+    table.data td[colspan] {
+        text-align: center;
+        padding: var(--space-3) 0;
+    }
+    table.data td[colspan]::before { display: none; }
+
+    /* Expandable scans table — chevron pinned right; details stack ---- */
+    table.data.expandable tbody tr.scan-row {
+        position: relative;
+        padding-right: 36px;
+    }
+    table.data.expandable tbody tr.scan-row td.expand-cell {
+        position: absolute;
+        top: 14px;
+        right: var(--space-2);
+        width: 18px;
+        padding: 0;
+        display: block;
+        min-height: 0;
+    }
+    table.data.expandable tbody tr.scan-row td.expand-cell::before { display: none; }
+    table.data.expandable tbody tr.scan-detail td {
+        padding: 12px var(--space-2);
+        display: block;
+    }
+    table.data.expandable tbody tr.scan-detail td::before { display: none; }
+    .scan-detail__grid {
+        grid-template-columns: 1fr;
+        gap: 4px var(--space-2);
+    }
+    .scan-detail__grid dt { padding-top: 8px; }
+
+    /* Customer-row clickable — kill hover red-bar; tap is the affordance */
+    table.data tr.clickable-row td:first-child { padding-left: 0; }
+    table.data tr.clickable-row:hover td:first-child::before { display: none; }
+
+    /* ---- Buttons / pager: 44px tap targets ---- */
+    .btn, button.btn-primary, button.btn-ghost {
+        min-height: 40px;
+        padding: 8px 14px;
+    }
+    .pager-btn { width: 40px; height: 40px; }
+    td.actions button { min-height: 36px; padding: 6px 14px; }
+
+    /* ---- Check rows: chevron + title; summary wraps to next row ---- */
+    .check-row__head {
+        grid-template-columns: 24px 1fr;
+        grid-template-areas:
+            "chev title"
+            "chev summary";
+        row-gap: 6px;
+        padding: 12px var(--space-2);
+    }
+    .check-chevron { grid-area: chev; }
+    .check-row__title {
+        grid-area: title;
+        white-space: normal;
+        font-size: 13px;
+    }
+    .check-row__title .check-title-time { display: block; margin-bottom: 2px; }
+    .check-row__summary {
+        grid-area: summary;
+        flex-wrap: wrap;
+        gap: 4px;
+    }
+    .check-stat-pill { font-size: 10px; padding: 1px 6px; }
+    .check-row__body { padding: 8px var(--space-2) 12px; }
+    .check-line { font-size: 11px; line-height: 1.55; }
+    .check-list { max-height: 60vh; }
+
+    /* ---- Pagination: spread, taller ---- */
+    .pagination {
+        justify-content: space-between;
+        padding: 10px var(--space-2);
+    }
+    .pager-info { font-size: 13px; flex: 1; text-align: center; }
+
+    /* ---- Modals: full-width sheet ---- */
+    .modal { padding: 0; align-items: flex-end; }
+    .modal-card {
+        max-width: 100vw;
+        width: 100vw;
+        margin: 0;
+        border-radius: 16px 16px 0 0;
+        padding: var(--space-3) var(--space-2) calc(var(--space-3) + env(safe-area-inset-bottom, 0));
+    }
+
+    /* ---- Save bar: stack stays sticky, action button goes full width ---- */
+    .save-bar {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+        padding: 12px var(--space-2);
+    }
+    .save-bar .btn-primary { width: 100%; justify-content: center; }
+
+    /* ---- Services grid (chip per container) wraps tighter ---- */
+    .services-grid { gap: 4px !important; }
+
+    /* ---- Warn / info banners: less padding ---- */
+    .warn-banner { padding: 12px; gap: 10px; flex-wrap: wrap; }
+
+    /* ---- Hide right-side legend on Purchases (looks crowded on mobile) ---- */
+    .panel-header .legend { gap: 4px; }
+}
+
+/* ---- Phone tightening ---- */
+
+@media (max-width: 480px) {
+    .metric-grid { grid-template-columns: 1fr; }
+    .metric-card .value { font-size: 22px; }
+    .panel-header h1 { font-size: 20px; }
+    .topbar { height: 48px; }
+    .system-status { padding: 4px 8px; }
+    .system-status #systemText {
+        max-width: 110px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
 }
 
 /* ---- Small extras ---- */
 
 .super-only { transition: opacity 0.15s ease; }
 .super-only[data-hidden="true"] { display: none !important; }
+
+/* ============================================================
+   STAGE 1: Live check list (structured per-check rows + paging),
+   in-flight scan pulse, next-check countdown, expandable rows
+   ============================================================ */
+
+.check-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    background: var(--border);
+    max-height: 480px;
+    overflow-y: auto;
+}
+
+.check-empty {
+    padding: var(--space-3);
+    color: var(--text-mute);
+    background: var(--surface);
+    text-align: center;
+}
+
+.check-row {
+    background: var(--surface);
+    transition: background 0.12s ease;
+}
+
+.check-row__head {
+    display: grid;
+    grid-template-columns: auto 1fr auto auto;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 12px var(--space-3);
+    cursor: pointer;
+    user-select: none;
+}
+
+.check-row__head:hover { background: var(--surface-hover); }
+
+.check-chevron {
+    color: var(--text-mute);
+    transition: transform 0.18s ease;
+    display: inline-flex;
+}
+
+.check-row.expanded .check-chevron { transform: rotate(90deg); }
+
+.check-row__title {
+    font-weight: 500;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.check-row__title .check-title-time {
+    color: var(--text-mute);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    margin-right: 10px;
+}
+
+.check-row__summary {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    font-size: 12px;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+}
+
+.check-stat-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: var(--radius-pill);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+}
+
+.check-stat-pill.ok    { color: var(--ok);    border-color: rgba(34, 197, 94, 0.3); }
+.check-stat-pill.warn  { color: var(--warn);  border-color: rgba(245, 158, 11, 0.3); }
+.check-stat-pill.err   { color: var(--err);   border-color: rgba(239, 35, 60, 0.3); }
+.check-stat-pill.info  { color: var(--accent); border-color: rgba(59, 130, 246, 0.3); }
+
+.check-row__body {
+    display: none;
+    padding: 0 var(--space-3) var(--space-2);
+    border-top: 1px solid var(--border);
+    background: var(--surface-2);
+}
+.check-row.expanded .check-row__body { display: block; }
+
+.check-line {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.7;
+    white-space: pre-wrap;
+    word-break: break-word;
+    padding: 2px 0;
+}
+.check-line.log-info  { color: var(--text-dim); }
+.check-line.log-ok    { color: var(--ok); }
+.check-line.log-warn  { color: var(--warn); }
+.check-line.log-err   { color: var(--err); }
+
+/* ---- In-flight scan pulse (next to "Last scan" label) ---- */
+
+.scan-pulse {
+    display: inline-block;
+    position: relative;
+    width: 12px;
+    height: 12px;
+    margin-left: 8px;
+    vertical-align: middle;
+}
+.scan-pulse__core {
+    position: absolute;
+    inset: 3px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent-glow);
+}
+.scan-pulse__ring {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: 2px solid var(--accent);
+    opacity: 0.7;
+    animation: scan-pulse-ring 1.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+@keyframes scan-pulse-ring {
+    0%   { transform: scale(0.6); opacity: 0.9; }
+    80%  { transform: scale(1.6); opacity: 0; }
+    100% { transform: scale(1.6); opacity: 0; }
+}
+
+/* ---- Pagination ---- */
+
+.pagination {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-3);
+    border-top: 1px solid var(--border);
+    background: var(--surface-2);
+}
+
+.pager-btn {
+    background: transparent;
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.pager-btn:hover:not(:disabled) {
+    background: var(--surface-hover);
+    color: var(--text);
+    border-color: var(--border-strong);
+}
+.pager-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.pager-info {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-mute);
+    min-width: 90px;
+    text-align: center;
+}
+
+/* ---- Detected-trucks: expandable rows ---- */
+
+table.data.expandable tbody tr.scan-row { cursor: pointer; }
+table.data.expandable tbody tr.scan-row:hover td { background: var(--surface-hover); }
+table.data.expandable tbody tr.scan-row td.expand-cell {
+    color: var(--text-mute);
+    width: 24px;
+}
+table.data.expandable tbody tr.scan-row.expanded td.expand-cell svg {
+    transform: rotate(90deg);
+}
+table.data.expandable tbody tr.scan-row td.expand-cell svg {
+    transition: transform 0.18s ease;
+}
+table.data.expandable tbody tr.scan-detail { display: none; background: var(--surface-2); }
+table.data.expandable tbody tr.scan-detail.shown { display: table-row; }
+table.data.expandable tbody tr.scan-detail td {
+    padding: var(--space-2) var(--space-3);
+    border-top: 1px dashed var(--border);
+}
+.scan-detail__grid {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    column-gap: var(--space-3);
+    row-gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+.scan-detail__grid dt {
+    color: var(--text-mute);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-size: 11px;
+}
+.scan-detail__grid dd {
+    color: var(--text-dim);
+    margin: 0;
+    word-break: break-word;
+}
+.scan-detail__grid dd a { color: var(--accent); }
+
+
+/* ---- Notifications: filter pills row in the surface-card head ---- */
+
+.filter-group {
+    display: inline-flex;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.filter-pill {
+    background: var(--surface-2);
+    color: var(--text-mute);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    padding: 4px 12px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+
+.filter-pill:hover { color: var(--text); border-color: var(--border-strong); }
+.filter-pill.active {
+    background: var(--surface);
+    color: var(--text);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.25);
+}
+
+@media (max-width: 760px) {
+    .filter-group { width: 100%; justify-content: flex-start; }
+    .filter-pill { padding: 6px 10px; min-height: 32px; }
+}
+
+/* ============================================================
+   Autobuy toggle (iOS-style on/off switch in customer roster)
+   Green = autobuy on, gray = autobuy off. No text label;
+   color + thumb position is the affordance.
+   ============================================================ */
+
+.autobuy-toggle {
+    display: inline-flex;
+    align-items: center;
+    background: transparent;
+    border: 0;
+    padding: 4px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+.autobuy-toggle:disabled { opacity: 0.6; cursor: wait; }
+
+.autobuy-toggle__track {
+    width: 44px;
+    height: 24px;
+    border-radius: 14px;
+    background: #3F3F46;          /* gray when off */
+    position: relative;
+    transition: background 0.18s ease;
+    flex-shrink: 0;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+.autobuy-toggle__thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #FFFFFF;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+    transition: transform 0.18s ease;
+}
+
+.autobuy-toggle.on .autobuy-toggle__track { background: var(--ok); }   /* green when on */
+.autobuy-toggle.on .autobuy-toggle__thumb { transform: translateX(20px); }
+
+.autobuy-toggle:focus-visible .autobuy-toggle__track {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+@media (max-width: 760px) {
+    .autobuy-toggle { padding: 6px; }
+    .autobuy-toggle__track { width: 50px; height: 28px; border-radius: 16px; }
+    .autobuy-toggle__thumb { width: 24px; height: 24px; }
+    .autobuy-toggle.on .autobuy-toggle__thumb { transform: translateX(22px); }
+}
+
+/* ============================================================
+   Roster section (Scans → Next up / Last buy / Cool-off)
+   Three labeled rows; mobile-friendly stacked layout.
+   ============================================================ */
+
+.roster-row {
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    gap: var(--space-3);
+    align-items: center;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+}
+.roster-row:last-child { border-bottom: none; padding-bottom: 0; }
+.roster-row:first-child { padding-top: 0; }
+
+.roster-row__label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-mute);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.roster-row__value {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    color: var(--text);
+}
+
+.roster-empty {
+    color: var(--text-mute);
+    font-style: italic;
+    font-size: 13px;
+}
+
+.customer-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-radius: var(--radius-pill);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    font-size: 13px;
+}
+.customer-chip__name { font-weight: 500; color: var(--text); }
+.customer-chip__meta {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-mute);
+    border-left: 1px solid var(--border-strong);
+    padding-left: 8px;
+}
+
+.customer-chip.ok    { border-color: rgba(34, 197, 94, 0.4);  background: rgba(34, 197, 94, 0.08); }
+.customer-chip.ok .customer-chip__name { color: var(--ok); }
+.customer-chip.warn  { border-color: rgba(245, 158, 11, 0.4); background: rgba(245, 158, 11, 0.08); }
+.customer-chip.warn .customer-chip__name { color: var(--warn); }
+.customer-chip.err   { border-color: rgba(239, 35, 60, 0.4);  background: rgba(239, 35, 60, 0.08); }
+.customer-chip.err .customer-chip__name { color: var(--err); }
+.customer-chip.idle  { color: var(--text-dim); }
+
+.roster-upnext-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    margin-left: 4px;
+    width: 100%;
+    padding-top: 6px;
+}
+.roster-upnext-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-mute);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+.roster-up-next {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--surface-2);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-pill);
+    padding: 3px 10px;
+}
+
+@media (max-width: 760px) {
+    .roster-row {
+        grid-template-columns: 1fr;
+        gap: 6px;
+        padding: 10px 0;
+    }
+    .customer-chip { font-size: 12px; padding: 5px 10px; }
+    .customer-chip__meta { font-size: 10px; }
+}
+
+/* ============================================================
+   Customers toolbar (search + filter pills)
+   ============================================================ */
+
+.toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 12px var(--space-3);
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
+}
+
+.toolbar-search {
+    position: relative;
+    display: flex;
+    align-items: center;
+    flex: 1 1 220px;
+    min-width: 180px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    padding: 0 10px;
+    transition: border-color 0.12s ease;
+}
+.toolbar-search:focus-within { border-color: var(--accent); }
+.toolbar-search svg { color: var(--text-mute); flex-shrink: 0; }
+.toolbar-search input {
+    flex: 1;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    padding: 9px 8px;
+    outline: none;
+    min-width: 0;
+}
+.toolbar-search input::placeholder { color: var(--text-mute); }
+
+@media (max-width: 760px) {
+    .toolbar { padding: 10px var(--space-2); gap: 8px; }
+    .toolbar-search { flex: 1 1 100%; }
+    .toolbar .filter-group { flex: 1 1 100%; }
+    .toolbar-search input { padding: 11px 8px; }
+}
+
+/* ============================================================
+   Customer detail: tab strip + autobuy bar
+   ============================================================ */
+
+.cd-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: var(--space-3);
+    border-bottom: 1px solid var(--border);
+}
+
+.cd-tab {
+    background: transparent;
+    border: 0;
+    color: var(--text-mute);
+    padding: 10px 16px;
+    font: inherit;
+    font-weight: 500;
+    cursor: pointer;
+    position: relative;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color 0.12s ease, border-color 0.12s ease;
+}
+.cd-tab:hover { color: var(--text); }
+.cd-tab.active {
+    color: var(--text);
+    border-bottom-color: var(--primary);
+}
+
+.cd-tabpanel { display: none; animation: fadeUp 0.25s ease both; }
+.cd-tabpanel.active { display: block; }
+
+.autobuy-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: 12px 16px;
+    margin-bottom: var(--space-3);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-card);
+}
+.autobuy-bar__label {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.autobuy-bar__label > span {
+    font-weight: 500;
+    color: var(--text);
+}
+.autobuy-bar__label > small {
+    color: var(--text-mute);
+    font-size: 12px;
+}
+
+@media (max-width: 760px) {
+    .cd-tabs { gap: 0; overflow-x: auto; }
+    .cd-tab { padding: 12px 14px; flex-shrink: 0; }
+    .autobuy-bar { padding: 12px; }
+}
+
+/* ============================================================
+   Analytics page
+   ============================================================ */
+
+.chart-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+    gap: var(--space-2);
+    margin-top: var(--space-3);
+}
+
+.chart-card { display: flex; flex-direction: column; }
+.chart-card--wide { grid-column: span 2; }
+.chart-card--full { grid-column: 1 / -1; }   /* spans the full chart-grid row */
+.chart-card .surface-card-body { flex: 1; min-height: 0; }
+/* Horizontal bar charts (10 trucks) get more vertical room to breathe. */
+.chart-card--full .chart-host { height: 360px; }
+
+.chart-host {
+    position: relative;
+    width: 100%;
+    height: 280px;
+    /* Chart.js sizes the canvas based on the container. We give it a
+       deterministic height so the layout doesn't jump around as data loads. */
+}
+
+.data-gaps {
+    list-style: disc;
+    margin: 0;
+    padding-left: 20px;
+    color: var(--text-dim);
+    font-size: 13px;
+}
+.data-gaps li { margin: 6px 0; }
+
+@media (max-width: 1100px) {
+    .chart-card--wide,
+    .chart-card--full { grid-column: 1 / -1; }
+}
+
+@media (max-width: 760px) {
+    .chart-grid {
+        grid-template-columns: 1fr;
+        gap: var(--space-1);
+    }
+    .chart-host { height: 220px; }
+    .panel-actions #analyticsRange { flex-wrap: wrap; }
+}
+
+/* ============================================================
+   Audit page — time column nowrap + native select styling
+   ============================================================ */
+
+/* Keep "Today · 3:14 PM" on one line so the AM/PM never wraps. */
+.audit-col-time { white-space: nowrap; }
+
+/* Native <select> styled to match the rest of the toolbar inputs. */
+.select-input {
+    appearance: none;
+    -webkit-appearance: none;
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    padding: 9px 32px 9px 12px;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    background-image:
+        linear-gradient(45deg, transparent 50%, var(--text-mute) 50%),
+        linear-gradient(135deg, var(--text-mute) 50%, transparent 50%);
+    background-position: calc(100% - 18px) 14px, calc(100% - 13px) 14px;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+    transition: border-color 0.12s ease;
+    min-height: 38px;
+}
+.select-input:focus { outline: none; border-color: var(--accent); }
+
+@media (max-width: 760px) {
+    /* On phone the table goes to cards, so the time row is its own block —
+       still keep the value on a single line within that block. */
+    table.data td.audit-col-time { white-space: nowrap; }
+    .select-input { flex: 1 1 100%; min-height: 44px; }
+}
+
+/* ============================================================
+   Test buy form
+   ============================================================ */
+
+.testbuy-form {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-2) var(--space-3);
+    align-items: start;
+}
+.testbuy-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.testbuy-form label small {
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 400;
+    color: var(--text-mute);
+    font-size: 11px;
+    margin-left: 6px;
+}
+.testbuy-form label.span-2 { grid-column: 1 / -1; }
+.testbuy-form input { margin-top: 0; }
+.testbuy-actions {
+    grid-column: 1 / -1;
+    display: flex;
+    gap: var(--space-2);
+    align-items: center;
+    margin-top: 4px;
+}
+
+button.btn-row-delete {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-mute);
+    padding: 4px 12px;
+    border-radius: var(--radius-control);
+    font-size: 12px;
+    cursor: pointer;
+    transition: color 0.12s ease, border-color 0.12s ease;
+}
+button.btn-row-delete:hover {
+    color: var(--err);
+    border-color: var(--err);
+}
+
+@media (max-width: 760px) {
+    .testbuy-form { grid-template-columns: 1fr; gap: 12px; }
+    .testbuy-actions .btn { flex: 1; }
+    button.btn-row-delete { padding: 8px 14px; min-height: 36px; }
+}
+
+/* ============================================================
+   Friendly Live log tail rendering
+   ============================================================ */
+
+.check-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+}
+
+.check-line .logfmt-icon {
+    flex-shrink: 0;
+    width: 18px;
+    text-align: center;
+    color: var(--text-mute);
+    font-size: 13px;
+}
+
+.check-line .logfmt-label {
+    font-weight: 500;
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 12px;
+    text-transform: none;
+}
+
+.check-line .logfmt-truck {
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 11px;
+}
+
+.check-line .logfmt-meta {
+    color: var(--text-mute);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    margin-left: auto;          /* push trailing meta to the right */
+}
+
+/* Severity tints — same as before, but apply to icon when emoji is missing. */
+.check-line.logfmt-tracked-avail .logfmt-icon { color: var(--ok); }
+.check-line.logfmt-skipped       .logfmt-icon { color: var(--warn); }
+.check-line.logfmt-excluded      .logfmt-icon { color: var(--text-mute); }
+.check-line.logfmt-autobuy       .logfmt-label,
+.check-line.logfmt-autobuy       .logfmt-icon  { color: var(--accent); }
+.check-line.logfmt-autobuy-off   .logfmt-icon  { color: var(--warn); }
+.check-line.logfmt-no-new        .logfmt-icon,
+.check-line.logfmt-no-new        .logfmt-label { color: var(--text-mute); }
+.check-line.logfmt-heartbeat     .logfmt-icon  { color: var(--primary); }
+
+@media (max-width: 760px) {
+    .check-line .logfmt-meta { margin-left: 0; flex-basis: 100%; }
+    .check-line .logfmt-truck { flex-basis: 100%; }
+}
+
+/* ============================================================
+   Login health section (Scans page)
+   ============================================================ */
+
+.login-row {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    gap: var(--space-3);
+    align-items: center;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+}
+.login-row:first-child { padding-top: 0; }
+.login-row:last-child  { border-bottom: none; padding-bottom: 0; }
+
+.login-row__label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-mute);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.login-row__value {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.login-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    border-radius: var(--radius-pill);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.login-pill.ok  { background: rgba(34, 197, 94, 0.1); color: var(--ok);  border: 1px solid rgba(34, 197, 94, 0.25); }
+.login-pill.err { background: rgba(239, 35, 60, 0.1); color: var(--err); border: 1px solid rgba(239, 35, 60, 0.25); }
+
+.login-email   { color: var(--text); font-size: 13px; }
+.login-meta    { color: var(--text-mute); font-size: 11px; }
+.login-error   { color: var(--err); font-size: 11px; flex-basis: 100%; word-break: break-all; }
+
+.login-attempt-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 8px;
+    border-radius: var(--radius-pill);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+}
+.login-attempt-chip.ok  { color: var(--ok); }
+.login-attempt-chip.err { color: var(--err); }
+.login-attempt-dot {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: currentColor;
+}
+
+@media (max-width: 760px) {
+    .login-row { grid-template-columns: 1fr; gap: 6px; padding: 10px 0; }
+}
+
+/* ============================================================
+   Test detail page (sub-panel of testbuy)
+   ============================================================ */
+
+.td-summary {
+    margin: 0 0 12px 0;
+    color: var(--text);
+    font-size: 15px;
+    line-height: 1.45;
+}
+
+.td-error {
+    margin: 0;
+    padding: var(--space-2);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 480px;
+    overflow-y: auto;
+}
+
+#tdScreenshot {
+    border-top: 1px solid var(--border);
+    background: #000;
+}
+
+#tdScreenshotLink:hover #tdScreenshot {
+    filter: brightness(1.05);
+}
+
+@media (max-width: 760px) {
+    .td-summary { font-size: 14px; }
+    .td-error { font-size: 11px; padding: 12px; max-height: 320px; }
+}
+
+/* Live-submit toggle on the test buy form */
+.testbuy-livesubmit {
+    flex-direction: row !important;
+    align-items: center;
+    gap: 10px;
+    background: var(--surface-2);
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    text-transform: none !important;
+    letter-spacing: 0 !important;
+    font-weight: 400 !important;
+    color: var(--text) !important;
+}
+.testbuy-livesubmit input[type="checkbox"] {
+    width: 18px; height: 18px;
+    flex-shrink: 0;
+    accent-color: var(--primary);
+    cursor: pointer;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+.testbuy-livesubmit > span:not(.icon) { font-weight: 500; font-size: 14px; }
+.testbuy-livesubmit small {
+    flex-basis: 100%;
+    color: var(--text-mute);
+    font-size: 12px;
+    margin-left: 28px;
+    line-height: 1.4;
+}
+
+/* ============================================================
+   Test history: keep cells on one line, truncate with ellipsis,
+   show full value on hover (and on the detail page).
+   ============================================================ */
+
+#testbuyTable td.testbuy-trunc {
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+}
+#testbuyTable td[data-label="Outcome"].testbuy-trunc { max-width: 320px; }
+#testbuyTable td[data-label="Truck"].testbuy-trunc   { max-width: 200px; color: var(--text-dim); }
+#testbuyTable tr.clickable-row { cursor: pointer; }
+
+@media (max-width: 760px) {
+    /* On mobile (card mode) cells are full-width; truncate the value
+       portion only — the data-label pseudo stays at its own size. */
+    #testbuyTable td.testbuy-trunc {
+        max-width: none;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+}

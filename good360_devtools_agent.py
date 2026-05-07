@@ -197,7 +197,17 @@ async def run_agent(
     truck_url: str,
     admin_fee: float,
     dry_run: bool,
+    org_override: dict[str, Any] | None = None,
 ) -> CheckoutAgentResult:
+    """Drive a Good360 checkout via Chrome DevTools MCP.
+
+    Production callers pass `org_key` and the agent loads that org's stored
+    credentials + card via `_load_org`. The dashboard's test page passes
+    `org_override` instead — a fully-formed dict providing master-account
+    login creds + form-supplied test card + form-supplied buyer info.
+    `_load_org` is bypassed in that case but `_validate_purchase_context`
+    still runs to enforce the safety flags.
+    """
     try:
         from agents import Agent, Runner
         from agents.mcp import MCPServerStdio
@@ -207,7 +217,14 @@ async def run_agent(
             "openai-agents is not installed. Install requirements or disable AUTOBUY_ENGINE=devtools_agent."
         ) from e
 
-    org = _load_org(org_key)
+    if org_override is not None:
+        # Test-page path: use the override dict directly. We still go through
+        # _validate_purchase_context so the live-purchase / secrets-to-model
+        # safety flags apply.
+        org = dict(org_override)
+        org.setdefault("card", {})
+    else:
+        org = _load_org(org_key)
     _validate_purchase_context(org_key, org, dry_run=dry_run)
 
     max_total = float(org.get("max_auto_pay") or org.get("max_price") or DEFAULT_MAX_TOTAL)
@@ -224,6 +241,12 @@ async def run_agent(
         "--headless",
         "--no-usage-statistics",
         "--redact-network-headers",
+        # Chrome refuses to start as root inside a Docker container without
+        # these flags. /dev/shm is also typically tiny in containers, so
+        # --disable-dev-shm-usage routes shared mem to /tmp.
+        "--chromeArg=--no-sandbox",
+        "--chromeArg=--disable-setuid-sandbox",
+        "--chromeArg=--disable-dev-shm-usage",
     ]
     chrome_executable = os.environ.get("DEVTOOLS_CHROME_EXECUTABLE")
     if chrome_executable:

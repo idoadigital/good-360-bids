@@ -53,14 +53,23 @@ CHAT_ID = _os.environ.get('TELEGRAM_GROUP_HOPE4HUMANITY', '')
 
 def send_telegram(message):
     """Send alert via Telegram"""
+    delivered = False
+    err = None
     try:
         import requests
         url = f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage'
         data = {'chat_id': CHAT_ID, 'text': message, 'parse_mode': 'HTML'}
         requests.post(url, json=data, timeout=10)
+        delivered = True
         print("[ALERT] Telegram sent")
     except Exception as e:
+        err = str(e)
         print(f"[ALERT] Telegram failed: {e}")
+    try:
+        from notifications_log import record_telegram
+        record_telegram(source='autobuy', message=message, delivered=delivered, error=err, channel='org:hope4humanity')
+    except Exception:
+        pass
 
 def log_step(step_num, step_name, screenshot_dir, page):
     """Log step and take screenshot"""

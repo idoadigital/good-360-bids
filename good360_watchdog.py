@@ -24,15 +24,24 @@ def log_alert(msg):
         f.write(f"[{datetime.now(ET).strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
 
 def send_telegram_alert(message):
+    delivered = False
+    err = None
     try:
         url = f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage'
         data = {'chat_id': CHAT_ID, 'text': message, 'parse_mode': 'HTML'}
         r = requests.post(url, json=data, timeout=10)
+        delivered = (r.status_code == 200)
         log_alert(f"Telegram sent: {r.status_code}")
         print("[WATCHDOG] ✅ Telegram alert sent")
     except Exception as e:
+        err = str(e)
         log_alert(f"Telegram FAILED: {e}")
         print(f"[WATCHDOG] ❌ Telegram failed: {e}")
+    try:
+        from notifications_log import record_telegram
+        record_telegram(source='watchdog', message=message, delivered=delivered, error=err, channel='operator')
+    except Exception:
+        pass
 
 def load_state():
     try:

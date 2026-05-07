@@ -727,4 +727,7 @@ if __name__ == '__main__':
         print(f'🔒 TLS: {ssl_ctx[0]}')
     else:
         print('⚠️  TLS cert not found — running plain HTTP. Set DASHBOARD_TLS_CERT/KEY for HTTPS.')
-    app.run(host='0.0.0.0', port=5001, debug=False, ssl_context=ssl_ctx)
+    # threaded=True so a slow request handler (e.g. one shelling out to
+    # `docker compose logs`) doesn't block every other poll. Without this,
+    # the dashboard's frequent polls pile up and the whole server freezes.
+    app.run(host='0.0.0.0', port=5001, debug=False, ssl_context=ssl_ctx, threaded=True)

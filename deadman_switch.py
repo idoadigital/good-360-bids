@@ -85,17 +85,27 @@ def save_state(state: dict) -> None:
 
 
 def send_alert(message: str) -> None:
+    delivered = False
+    err = None
     if not (BOT_TOKEN and CHAT_ID):
+        err = "no telegram config"
         print(f"[DEADMAN] No telegram config — would have sent: {message}", file=sys.stderr)
-        return
+    else:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json={"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"},
+                timeout=10,
+            )
+            delivered = True
+        except requests.RequestException as e:
+            err = str(e)
+            print(f"[DEADMAN] Telegram send failed: {e}", file=sys.stderr)
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"},
-            timeout=10,
-        )
-    except requests.RequestException as e:
-        print(f"[DEADMAN] Telegram send failed: {e}", file=sys.stderr)
+        from notifications_log import record_telegram
+        record_telegram(source='deadman', message=message, delivered=delivered, error=err, channel='operator')
+    except Exception:
+        pass
 
 
 def main() -> int:
