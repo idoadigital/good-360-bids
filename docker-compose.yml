@@ -11,6 +11,12 @@ services:
     env_file: .env
     volumes:
       - workdir:/app/workdir
+      - roster_data:/app/good360_roster/db
+      # Hot-reload of dashboard modules and the settings-bootstrap shim.
+      # Lets us iterate without rebuilding the image.
+      - ./missioncontrol:/app/missioncontrol:ro
+      - ./settings_bootstrap.py:/app/settings_bootstrap.py:ro
+      - ./good360_monitor.py:/app/good360_monitor.py:ro
     healthcheck:
       test: ["CMD", "python", "/app/healthcheck.py"]
       interval: 60s
@@ -25,6 +31,7 @@ services:
     env_file: .env
     volumes:
       - workdir:/app/workdir
+      - roster_data:/app/good360_roster/db
     ports:
       - "5002:5002"
     depends_on: [monitor]
@@ -52,6 +59,22 @@ services:
     env_file: .env
     volumes:
       - workdir:/app/workdir
+      # Bind-mount the dashboard source so we can iterate on css/js/python
+      # without rebuilding the image every time.
+      - ./missioncontrol:/app/missioncontrol:ro
+      # Self-signed TLS cert for HTTPS on the dashboard's public listener.
+      - ./tls:/app/tls:ro
+      # Settings writer needs to mutate the host .env so service restarts
+      # pick up new values. RW on purpose.
+      - ./.env:/app/.env
+      - ./docker-compose.yml:/app/docker-compose.yml:ro
+      # Restart sibling services from the dashboard. WARNING: mounting the
+      # docker socket grants effective host root to anything in this
+      # container — keep the dashboard's auth strong.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Shared roster.db so missioncontrol can sync QuickBeed customers into
+      # the nonprofits table that monitor/daemon's orchestrator reads from.
+      - roster_data:/app/good360_roster/db
     ports:
       - "5001:5001"
 
@@ -67,3 +90,4 @@ services:
 
 volumes:
   workdir:
+  roster_data:

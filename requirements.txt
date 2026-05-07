@@ -4,6 +4,7 @@
 # First pass — covers every top-level import in the codebase plus the two
 # transitive deps (httpx, aiohttp) flagged by the April 13 outage postmortem.
 aiohttp==3.11.11
+bcrypt==4.2.1
 cryptography==44.0.2
 flask==3.1.2
 httpx==0.28.1

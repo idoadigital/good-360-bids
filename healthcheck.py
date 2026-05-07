@@ -19,7 +19,9 @@ from __future__ import annotations
 import json
 import os
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+UTC = timezone.utc
 from pathlib import Path
 
 MAX_STALE_MINUTES = int(os.environ.get("HEALTH_MAX_STALE_MINUTES", "5"))
@@ -74,10 +76,15 @@ def check_orgs_configured() -> tuple[bool, str]:
 
 def main() -> int:
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
+    # Note: the postmortem-era `check_orgs_configured` looked for ${VAR}-style
+    # secrets in env. In the current architecture, scan creds come from the
+    # encrypted dashboard DB (settings_bootstrap) and per-org purchase creds
+    # are fetched live from QuickBeed. The heartbeat check is the meaningful
+    # "is the system actually doing work" signal — if the scan login is
+    # broken, the heartbeat won't advance.
     checks = [
         ("heartbeat", check_heartbeat),
         ("playwright", check_playwright),
-        ("orgs", check_orgs_configured),
     ]
     failed = 0
     for name, fn in checks:

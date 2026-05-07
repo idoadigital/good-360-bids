@@ -10,6 +10,7 @@ billing_manager.py, roster_orchestrator.py
 
 import json
 import logging
+import os
 import sqlite3
 import sys
 from contextlib import contextmanager
@@ -111,15 +112,130 @@ class CheckoutResult:
 
 
 # ─── Load Org Context ────────────────────────────────────────────────────────
+# ─── QuickBeed-backed org context (calls missioncontrol's internal API) ─────
+#
+# For QuickBeed-sourced nonprofits we don't store credentials or card data
+# in roster.db. Instead, at purchase time we ask missioncontrol for the live
+# org_config — it has the encrypted master key and is the only process
+# allowed to decrypt the QuickBeed token and call /customers/{id}.
+#
+# The internal endpoint requires an X-API-Key matching MISSIONCONTROL_API_KEY
+# (already in shared .env). missioncontrol serves HTTPS on a self-signed cert
+# inside the Docker network — we set verify=False since this is intra-cluster.
+
+def _load_org_context_quickbeed(org_row, quickbeed_customer_id: str) -> OrgContext:
+    import requests  # local import — keeps top-level imports unchanged for legacy path
+
+    base = os.environ.get("MISSIONCONTROL_INTERNAL_URL", "https://missioncontrol:5001")
+    api_key = os.environ.get("MISSIONCONTROL_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("MISSIONCONTROL_API_KEY not set; cannot fetch QuickBeed org config")
+
+    url = f"{base}/api/internal/org-config/{quickbeed_customer_id}"
+    resp = requests.get(
+        url,
+        params={"reason": "credential_use"},
+        headers={"X-API-Key": api_key},
+        timeout=15,
+        verify=False,  # self-signed cert on the internal Docker network
+    )
+    if resp.status_code != 200:
+        raise ValueError(f"missioncontrol /org-config returned {resp.status_code}: {resp.text[:300]}")
+    payload = resp.json()
+    if not payload.get("success"):
+        raise ValueError(f"missioncontrol /org-config error: {payload.get('error')}")
+    cfg = payload["org_config"]
+
+    if not cfg.get("good360_email") or not cfg.get("good360_password"):
+        raise ValueError(
+            f"QuickBeed customer {quickbeed_customer_id} has no usable partner_credentials "
+            f"(status={payload.get('status')}); refusing to attempt purchase"
+        )
+
+    primary = cfg.get("card") or {}
+    fallbacks = cfg.get("fallback_cards") or []
+    payment_methods = []
+    for prio, c in enumerate([primary] + fallbacks, start=1):
+        if not c or not c.get("number"):
+            continue
+        try:
+            exp_month = int(c["expiry"][:2])
+            exp_year_full = 2000 + int(c["expiry"][2:])
+        except (KeyError, ValueError, TypeError):
+            logger.warning(f"QB card #{prio} has unparseable expiry — skipping")
+            continue
+        billing = c.get("billing") or {}
+        payment_methods.append({
+            "id": None,                    # no local DB row
+            "priority": prio,
+            "card_holder_name": c.get("name") or cfg.get("name"),
+            "card_number": c.get("number"),
+            "card_last4": (c.get("number") or "")[-4:],
+            "card_expiry_month": exp_month,
+            "card_expiry_year": exp_year_full,
+            "card_cvv": c.get("cvv"),
+            "billing_zip": billing.get("zip", ""),
+            "card_type": c.get("type"),
+        })
+
+    if not payment_methods:
+        raise ValueError(
+            f"QuickBeed customer {quickbeed_customer_id} has no usable payment_methods; "
+            "refusing to attempt purchase"
+        )
+
+    addresses = []
+    if cfg.get("warehouse_address"):
+        addresses.append({
+            "id": None, "address_label": "warehouse",
+            "address_line": cfg["warehouse_address"],
+            "is_primary": 1,
+        })
+
+    return OrgContext(
+        org_id=org_row["id"],
+        org_uuid=org_row["uuid"],
+        org_name=cfg.get("name") or org_row["org_name"],
+        contact_name=org_row["contact_name"],
+        contact_email=org_row["contact_email"],
+        alert_email=org_row["alert_email"] or org_row["contact_email"],
+        phone_number=org_row["phone_number"] or "",
+        sms_alerts_enabled=False,
+        auto_buy_global=bool(org_row["auto_buy_global"]),
+        master_card_fallback=False,
+        max_price_override=cfg.get("max_price") or org_row["max_price_override"],
+        good360_email=cfg["good360_email"],
+        good360_password=cfg["good360_password"],
+        good360_org_id=None,
+        addresses=addresses,
+        payment_methods=payment_methods,
+        category_prefs={},
+        checkout_answers=cfg.get("checkout_answers") or {},
+    )
+
+
 def load_org_context(org_id: int) -> OrgContext:
     """
-    Load full org context from DB including decrypted credentials.
-    All sensitive fields (password, card, CVV) are decrypted here.
+    Load full org context.
+
+    For legacy nonprofits (no `quickbeed_customer_id`), reads + decrypts from
+    the local roster.db nonprofit_credentials / nonprofit_payment_methods
+    tables (existing behavior, unchanged).
+
+    For QuickBeed-sourced nonprofits, calls missioncontrol's internal API to
+    pull the full record live — credentials and card data are never persisted
+    locally. The plaintext lives in memory only for the duration of the
+    purchase attempt and is discarded with the OrgContext.
     """
     with get_db_connection() as conn:
         org = conn.execute("SELECT * FROM nonprofits WHERE id = ?", (org_id,)).fetchone()
         if not org:
             raise ValueError(f"Org {org_id} not found")
+
+        org_keys = org.keys() if hasattr(org, "keys") else []
+        qb_id = org["quickbeed_customer_id"] if "quickbeed_customer_id" in org_keys else None
+        if qb_id:
+            return _load_org_context_quickbeed(org, qb_id)
 
         cred = conn.execute(
             "SELECT * FROM nonprofit_credentials WHERE nonprofit_id = ?", (org_id,)
@@ -309,7 +425,31 @@ def run_checkout_sequence(org: OrgContext, truck: TruckContext,
     8. Capture confirmation
 
     Returns CheckoutResult.
+
+    Dry-run gate: when QUICKBEED_DRY_RUN=true (env var) AND the org came from
+    QuickBeed, we DO NOT click Place Order. We log the masked checkout
+    payload and return a synthetic success-shaped result so the rest of the
+    flow exercises end-to-end without spending real money. Required for the
+    first staging round per ops policy.
     """
+    dry_run = os.environ.get("QUICKBEED_DRY_RUN", "").lower() in ("1", "true", "yes")
+    is_qb = getattr(org, "good360_org_id", "sentinel") is None  # QB orgs have None here
+    if dry_run and is_qb:
+        masked_card = (payment_card.get("card_number") or "")[-4:]
+        logger.warning(
+            "🛑 QUICKBEED_DRY_RUN active — would attempt purchase\n"
+            f"   org={org.org_name} ({org.org_id}) · truck={truck.truck_title!r} @ ${truck.truck_price}\n"
+            f"   card=****{masked_card} exp={payment_card.get('card_expiry_month'):02d}/{payment_card.get('card_expiry_year')}\n"
+            f"   good360_email={org.good360_email}"
+        )
+        return CheckoutResult(
+            success=True,
+            status="dry_run_ok",
+            mode="auto_buy",
+            order_total=truck.truck_price,
+            confirmation_number=f"DRYRUN-{org.org_id}-{truck.truck_event_id}",
+            error_message=None,
+        )
 
     # Prepare browser agent message
     checkout_data = {

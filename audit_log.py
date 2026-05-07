@@ -17,7 +17,9 @@ from __future__ import annotations
 import json
 import os
 import socket
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+UTC = timezone.utc
 from pathlib import Path
 
 _AUDIT_DIR = Path(os.environ.get("AUDIT_LOG_DIR", os.environ.get("WORKDIR", "/app/workdir") + "/audit"))

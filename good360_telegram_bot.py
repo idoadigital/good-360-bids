@@ -15,6 +15,14 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 # === CONFIG ===
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+if not TELEGRAM_TOKEN:
+    # Bot is optional — if no token is configured, idle the container so it
+    # doesn't restart-loop and pollute logs. Set TELEGRAM_BOT_TOKEN in .env
+    # and recreate this service to enable.
+    import time as _t
+    print("[TELEGRAM_BOT] TELEGRAM_BOT_TOKEN not set — bot disabled, idling.", flush=True)
+    while True:
+        _t.sleep(3600)
 ALLOWED_CHAT_IDS = [
     int(x) for x in [
         os.environ.get("TELEGRAM_GROUP_HOPE4HUMANITY"),

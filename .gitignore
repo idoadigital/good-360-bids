@@ -95,3 +95,6 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# Self-signed TLS material for the dashboard listener
+tls/

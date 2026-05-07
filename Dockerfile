@@ -35,6 +35,23 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# Docker CLI + compose plugin (no daemon) — used by the admin dashboard to
+# restart sibling services after a settings write. Static binaries so we
+# don't depend on what's in apt for the base distro.
+ENV DOCKER_VERSION=27.5.1 \
+    DOCKER_COMPOSE_VERSION=2.32.4
+RUN set -eux; \
+    curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_VERSION}.tgz" \
+        | tar -xzC /tmp; \
+    mv /tmp/docker/docker /usr/local/bin/docker; \
+    rm -rf /tmp/docker; \
+    mkdir -p /usr/local/lib/docker/cli-plugins; \
+    curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-compose \
+        "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-x86_64"; \
+    chmod +x /usr/local/lib/docker/cli-plugins/docker-compose; \
+    docker --version; \
+    docker compose version
+
 # Install Python deps first for better layer caching.
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt

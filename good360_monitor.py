@@ -9,6 +9,16 @@ from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+# Pull master scan credentials + OpenAI key from the dashboard's encrypted
+# SQLite settings store. Single source of truth; the operator manages these
+# via the dashboard UI. No-op if DASHBOARD_MASTER_KEY isn't set.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "good360_roster"))
+import settings_bootstrap  # noqa: F401
+
+ROSTER_ENABLED = os.environ.get("ROSTER_ENABLED", "false").strip().lower() in ("1", "true", "yes")
+ROSTER_DRY_RUN = os.environ.get("ROSTER_DRY_RUN", "false").strip().lower() in ("1", "true", "yes")
+
 import pytz
 import requests
 from playwright.sync_api import sync_playwright
@@ -33,8 +43,12 @@ from pathlib import Path
 # ============================================================
 GOOD360_URL = "https://catalog.good360.org/marketplace/browse-goods/truckload-donations/amazon.html"
 GOOD360_LOGIN_URL = "https://catalog.good360.org/marketplace/home"
-GOOD360_EMAIL = os.environ.get("GOOD360_HOPE4HUMANITY_EMAIL", "")
-GOOD360_PASSWORD = os.environ.get("GOOD360_HOPE4HUMANITY_PASSWORD", "")
+# Master scan credentials. Prefer SCAN_GOOD360_* (set by the dashboard),
+# fall back to the legacy per-org name for backwards compatibility.
+GOOD360_EMAIL = (os.environ.get("SCAN_GOOD360_EMAIL")
+                 or os.environ.get("GOOD360_HOPE4HUMANITY_EMAIL", ""))
+GOOD360_PASSWORD = (os.environ.get("SCAN_GOOD360_PASSWORD")
+                    or os.environ.get("GOOD360_HOPE4HUMANITY_PASSWORD", ""))
 
 SMTP_USER = os.environ.get("ALERT_EMAIL_FROM", "")
 SMTP_PASS = os.environ.get("SMTP_PASSWORD", "")
@@ -81,6 +95,48 @@ def get_org_for_truck(truck_name):
             if target.lower() in truck_name.lower():
                 return key, org
     return None, None
+
+
+def _categorize_truck(truck_name: str) -> str:
+    """Map a truck title to the roster's category_key. Mirrors is_autobuy_target keywords."""
+    n = truck_name.lower()
+    if "new unsorted" in n or "unsorted" in n:
+        return "unsorted"
+    if "variety" in n:
+        return "variety"
+    if "houseware" in n:
+        return "houseware"
+    return "other"
+
+
+def _roster_result_to_action(result, truck_name: str) -> str:
+    """Translate handle_truck_event's return (dict or CheckoutResult) into an action_taken string."""
+    # CheckoutResult dataclass path
+    if hasattr(result, "success") and hasattr(result, "status"):
+        org_label = f"org#{getattr(result, 'org_id', '?')}"
+        if result.success:
+            return f"AUTO-BUY SUCCESS ({org_label}) [roster]"
+        status = (result.status or "unknown").upper()
+        msg = result.error_message or ""
+        return f"AUTO-BUY {status} ({org_label}) [roster]" + (f": {msg}" if msg else "")
+    # Dict early-return path
+    if isinstance(result, dict):
+        s = result.get("status", "unknown")
+        ev = result.get("event_id", "?")
+        org = result.get("org_id")
+        org_label = f"org#{org}" if org else "no-org"
+        if s == "no_org_available":
+            return f"AUTO-BUY SKIPPED [roster]: no available org in queue (event {ev})"
+        if s == "category_excluded":
+            return f"AUTO-BUY SKIPPED [roster]: category excluded for {org_label}"
+        if s == "alert_only":
+            return f"ALERT-ONLY [roster]: {org_label} is alert-only mode"
+        if s == "price_exceeded":
+            return f"AUTO-BUY SKIPPED [roster]: price exceeded for {org_label}"
+        if s == "would_attempt_purchase":
+            return f"DRY-RUN [roster]: would purchase via {org_label}"
+        return f"AUTO-BUY {s.upper()} [roster] ({org_label})"
+    return f"AUTO-BUY UNKNOWN [roster]: {result!r}"
 
 def get_all_org_telegram_groups():
     """Get list of all org Telegram groups for alerts"""
@@ -898,6 +954,35 @@ def main():
                 # 2. MULTI-ORG AUTO-BUY: Find which org should buy this truck
                 truck_lower = truck_name.lower()
                 is_autobuy_target = "new unsorted" in truck_lower or "variety" in truck_lower or "houseware" in truck_lower
+
+                if is_autobuy_target and ROSTER_ENABLED:
+                    # NEW PATH: route through roster_orchestrator → QuickBeed customer rotation.
+                    # Picks next eligible QB customer from roster.db, autobuy_v2 fetches creds
+                    # live from QuickBeed, applies cooldown, dispatches notifications internally.
+                    try:
+                        from roster_orchestrator import handle_truck_event, log_truck_event
+                        event_id = log_truck_event(
+                            truck_title=truck_name,
+                            truck_url=truck_url,
+                            truck_price=0.0,
+                            truck_location=truck.get("location", ""),
+                            truck_category=_categorize_truck(truck_name),
+                            raw_data=truck,
+                        )
+                        log_cron(f"Roster event #{event_id} logged for {truck_name}")
+                        result = handle_truck_event(event_id, auto_run=not ROSTER_DRY_RUN)
+                        action_taken = _roster_result_to_action(result, truck_name)
+                        log_cron(f"Roster outcome for {truck_name}: {action_taken}")
+                    except Exception as e:
+                        err = f"Roster path failed for {truck_name}: {e}\n{traceback.format_exc()}"
+                        print(err)
+                        log_cron(err)
+                        send_error_alert(err)
+                        action_taken = f"ROSTER ERROR: {e}"
+                    if truck_name not in state["alerted"]:
+                        state["alerted"].append(truck_name)
+                    alert_sent = True
+                    continue
 
                 if is_autobuy_target:
                     # Load all orgs and find one that targets this truck AND has auto-buy active

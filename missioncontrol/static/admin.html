@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mission Control · Admin</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body class="admin-body">
+
+<div class="app-shell">
+
+    <!-- ===================== SIDEBAR ===================== -->
+    <aside class="sidebar">
+        <div class="sidebar-brand">
+            <div class="brand-mark">MC</div>
+            <div class="brand-text">
+                <span class="brand-name">Mission Control</span>
+                <span class="brand-tag">good360 · admin</span>
+            </div>
+        </div>
+
+        <div class="sidebar-section-label">Operations</div>
+        <nav class="sidebar-nav">
+            <button class="nav-item tab active" data-tab="scans">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>
+                </svg>
+                <span>Scans</span>
+                <span class="badge" id="scansBadge">—</span>
+            </button>
+            <button class="nav-item tab" data-tab="purchases">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 3h2l2.5 13H19l2-9H6"/><circle cx="9" cy="20" r="1.5"/><circle cx="17" cy="20" r="1.5"/>
+                </svg>
+                <span>Purchases</span>
+                <span class="badge" id="purchasesBadge">—</span>
+            </button>
+
+            <div class="sidebar-section-label">Manage</div>
+            <button class="nav-item tab" data-tab="customers">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20 21v-2a4 4 0 0 0-3-3.87"/><path d="M4 21v-2a4 4 0 0 1 3-3.87"/>
+                    <circle cx="12" cy="7" r="4"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/><path d="M8 3.13a4 4 0 0 0 0 7.75"/>
+                </svg>
+                <span>Customers</span>
+                <span class="badge" id="customersBadge">—</span>
+            </button>
+            <button class="nav-item tab" data-tab="users">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+                    <path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                </svg>
+                <span>Users</span>
+            </button>
+            <button class="nav-item tab" data-tab="settings">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="3"/>
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.36.16.66.42.87.74.21.32.32.7.32 1.09 0 .39-.11.77-.32 1.09-.21.32-.51.58-.87.74Z"/>
+                </svg>
+                <span>Settings</span>
+            </button>
+            <button class="nav-item tab" data-tab="audit">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>
+                    <path d="M9 13h6"/><path d="M9 17h4"/>
+                </svg>
+                <span>Audit</span>
+            </button>
+        </nav>
+
+        <div class="sidebar-footer">
+            <div class="user-chip">
+                <div class="user-avatar" id="userAvatar">?</div>
+                <div class="user-meta">
+                    <span class="user-email" id="userEmail">…</span>
+                    <span class="user-role" id="userRole">…</span>
+                </div>
+            </div>
+            <button class="signout-btn" id="logoutBtn" title="Sign out">
+                <svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
+                </svg>
+                <span class="signout-btn-label">Sign out</span>
+            </button>
+        </div>
+    </aside>
+
+    <!-- ===================== MAIN ===================== -->
+    <div class="main">
+        <header class="topbar">
+            <div class="crumbs">
+                <strong>Digital Excellence</strong>
+                <span class="sep">/</span>
+                <span id="crumbCurrent">Scans</span>
+            </div>
+            <div class="system-status" id="systemStatus">
+                <span class="dot" id="systemDot"></span>
+                <span id="systemText">checking…</span>
+            </div>
+        </header>
+
+        <div class="content">
+
+            <!-- ============ SCANS ============ -->
+            <section data-panel="scans" class="panel active">
+                <div class="panel-header">
+                    <div>
+                        <h1>Scan telemetry</h1>
+                        <p class="lede">Every truck scan and login attempt. Auto-refreshes every <span id="scanRefreshSec">5</span>s while this tab is open.</p>
+                    </div>
+                    <div class="panel-actions">
+                        <label style="display:inline-flex;align-items:center;gap:8px;font-family:var(--font-mono);font-size:11px;color:var(--text-mute);text-transform:uppercase;letter-spacing:.05em">
+                            <input type="checkbox" id="scanAutoRefresh" checked style="width:auto;margin:0">
+                            auto-refresh
+                        </label>
+                        <button id="scanRefreshBtn" class="btn btn-ghost">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><polyline points="21 3 21 9 15 9"/></svg>
+                            Refresh now
+                        </button>
+                    </div>
+                </div>
+
+                <div class="metric-grid">
+                    <div class="metric-card">
+                        <div class="label">Last scan</div>
+                        <div class="value" id="metricLastScan">—</div>
+                        <div class="meta" id="metricLastScanMeta">no data yet</div>
+                    </div>
+                    <div class="metric-card accent">
+                        <div class="label">Scans / window</div>
+                        <div class="value" id="metricScanCount">0</div>
+                        <div class="meta">last 200 entries</div>
+                    </div>
+                    <div class="metric-card primary">
+                        <div class="label">Errors (recent)</div>
+                        <div class="value" id="metricErrorCount">0</div>
+                        <div class="meta" id="metricErrorMeta">last 200 log lines</div>
+                    </div>
+                    <div class="metric-card ok">
+                        <div class="label">Login health</div>
+                        <div class="value" id="metricLoginHealth">—</div>
+                        <div class="meta" id="metricLoginMeta">no recent logins</div>
+                    </div>
+                </div>
+
+                <div class="surface-card" style="margin-bottom:var(--space-3)">
+                    <div class="surface-card-head">
+                        <h2>Services</h2>
+                        <span class="sub">running state of every container</span>
+                    </div>
+                    <div class="surface-card-body" id="servicesGrid">—</div>
+                </div>
+
+                <div class="surface-card" style="margin-bottom:var(--space-3)">
+                    <div class="surface-card-head">
+                        <h2>Live log tail</h2>
+                        <span class="sub" id="tailMeta">—</span>
+                    </div>
+                    <div class="surface-card-body flush">
+                        <pre class="log-tail" id="logTail"><em style="color:var(--text-mute)">no log yet — start the monitor service</em></pre>
+                    </div>
+                </div>
+
+                <div class="surface-card">
+                    <div class="surface-card-head">
+                        <h2>Detected trucks</h2>
+                        <span class="sub" id="hbStatus">heartbeat: —</span>
+                    </div>
+                    <div class="surface-card-body flush">
+                        <table class="data" id="scansTable">
+                            <thead><tr>
+                                <th>Time</th><th>Org</th><th>Login</th><th>Truck</th><th>Status</th>
+                            </tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============ PURCHASES ============ -->
+            <section data-panel="purchases" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <h1>Purchase ledger</h1>
+                        <p class="lede">Append-only record of every purchase attempt — pass and fail.</p>
+                    </div>
+                    <div class="legend">
+                        <span class="pill ok">success</span>
+                        <span class="pill warn">partial</span>
+                        <span class="pill err">fail</span>
+                    </div>
+                </div>
+
+                <div class="metric-grid">
+                    <div class="metric-card ok">
+                        <div class="label">Successful</div>
+                        <div class="value" id="purchOk">0</div>
+                        <div class="meta">last 14 days</div>
+                    </div>
+                    <div class="metric-card primary">
+                        <div class="label">Failed</div>
+                        <div class="value" id="purchFail">0</div>
+                        <div class="meta">last 14 days</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="label">Total spend</div>
+                        <div class="value" id="purchTotal">$0</div>
+                        <div class="meta">on successful only</div>
+                    </div>
+                </div>
+
+                <div class="surface-card">
+                    <div class="surface-card-head">
+                        <h2>Attempts</h2>
+                        <span class="sub">most recent first</span>
+                    </div>
+                    <div class="surface-card-body flush">
+                        <table class="data" id="purchasesTable">
+                            <thead><tr>
+                                <th>Time</th><th>Org</th><th>Truck</th><th>Total</th><th>Status</th><th>Detail</th>
+                            </tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============ CUSTOMER DETAIL (sub-panel of customers) ============ -->
+            <section data-panel="customer-detail" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <h1 id="cdName">Customer detail</h1>
+                        <p class="lede" id="cdSub">—</p>
+                    </div>
+                    <div class="panel-actions">
+                        <button id="cdRevealBtn" class="btn btn-ghost super-only" title="Calls QuickBeed and audit-logs the access">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                            Show full record
+                        </button>
+                        <button class="btn btn-ghost tab" data-tab="customers">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                            Back
+                        </button>
+                    </div>
+                </div>
+
+                <div class="metric-grid">
+                    <div class="metric-card" id="cdMetricStatus">
+                        <div class="label">Status</div>
+                        <div class="value" id="cdStatus">—</div>
+                        <div class="meta" id="cdStatusMeta">—</div>
+                    </div>
+                    <div class="metric-card accent">
+                        <div class="label">Max budget</div>
+                        <div class="value" id="cdBudget">—</div>
+                        <div class="meta">priority <span id="cdPriority">—</span></div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="label">Last used</div>
+                        <div class="value" id="cdLastUsed">—</div>
+                        <div class="meta" id="cdCooldown">no cooldown</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="label">Synced</div>
+                        <div class="value" id="cdSynced">—</div>
+                        <div class="meta" id="cdUpdated">—</div>
+                    </div>
+                </div>
+
+                <div class="surface-card" style="margin-bottom:var(--space-3)">
+                    <div class="surface-card-head"><h2>Profile</h2></div>
+                    <div class="surface-card-body">
+                        <dl class="kv-grid" id="cdProfile"></dl>
+                    </div>
+                </div>
+
+                <div class="surface-card" style="margin-bottom:var(--space-3)">
+                    <div class="surface-card-head"><h2>Operations</h2></div>
+                    <div class="surface-card-body">
+                        <dl class="kv-grid" id="cdOps"></dl>
+                    </div>
+                </div>
+
+                <div class="surface-card" style="margin-bottom:var(--space-3)">
+                    <div class="surface-card-head">
+                        <h2>Partner credentials</h2>
+                        <span class="sub" id="cdCredsSub">click "Show full record" to reveal</span>
+                    </div>
+                    <div class="surface-card-body">
+                        <dl class="kv-grid" id="cdCreds">
+                            <dt>username</dt><dd class="mono"><em style="color:var(--text-mute)">hidden — click "Show full record"</em></dd>
+                            <dt>password</dt><dd class="mono"><em style="color:var(--text-mute)">hidden</em></dd>
+                        </dl>
+                    </div>
+                </div>
+
+                <div class="surface-card" style="margin-bottom:var(--space-3)">
+                    <div class="surface-card-head">
+                        <h2>Payment methods</h2>
+                        <span class="sub" id="cdCardsSub">card numbers and CVVs are masked even after reveal</span>
+                    </div>
+                    <div class="surface-card-body">
+                        <div id="cdCards"><em style="color:var(--text-mute)">hidden — click "Show full record"</em></div>
+                    </div>
+                </div>
+
+                <div class="surface-card">
+                    <div class="surface-card-head"><h2>Acknowledgements</h2></div>
+                    <div class="surface-card-body">
+                        <dl class="kv-grid" id="cdAcks">
+                            <dt colspan="2"><em style="color:var(--text-mute)">live fetch only</em></dt>
+                        </dl>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============ CUSTOMERS (synced from QuickBeed) ============ -->
+            <section data-panel="customers" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <h1>Customers</h1>
+                        <p class="lede">Synced from the QuickBeed onboarding API. Active customers feed the round-robin.</p>
+                    </div>
+                    <div class="panel-actions super-only">
+                        <button id="testQbBtn" class="btn btn-ghost">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"/></svg>
+                            Test connection
+                        </button>
+                        <button id="syncQbBtn" class="btn btn-ghost">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><polyline points="21 3 21 9 15 9"/></svg>
+                            Resync now
+                        </button>
+                        <button id="bootstrapQbBtn" class="btn btn-ghost" title="Re-pull every customer (slow)">Full bootstrap</button>
+                    </div>
+                </div>
+
+                <div class="metric-grid">
+                    <div class="metric-card ok">
+                        <div class="label">Active</div>
+                        <div class="value" id="custActive">0</div>
+                        <div class="meta">eligible for rotation</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="label">Onboarding</div>
+                        <div class="value" id="custOnboarding">0</div>
+                        <div class="meta">intake in progress</div>
+                    </div>
+                    <div class="metric-card warn">
+                        <div class="label">Paused</div>
+                        <div class="value" id="custPaused">0</div>
+                        <div class="meta">temporarily skipped</div>
+                    </div>
+                    <div class="metric-card primary">
+                        <div class="label">Inactive</div>
+                        <div class="value" id="custInactive">0</div>
+                        <div class="meta">disabled / suspended</div>
+                    </div>
+                </div>
+
+                <div class="surface-card" style="margin-bottom:var(--space-3)">
+                    <div class="surface-card-head">
+                        <h2>Connection</h2>
+                        <span class="sub" id="qbConnSub">—</span>
+                    </div>
+                    <div class="surface-card-body">
+                        <pre class="apply-output" id="qbConnOutput" hidden style="margin:0"></pre>
+                    </div>
+                </div>
+
+                <div class="surface-card">
+                    <div class="surface-card-head">
+                        <h2>Roster</h2>
+                        <span class="sub" id="custRosterSub">—</span>
+                    </div>
+                    <div class="surface-card-body flush">
+                        <table class="data" id="customersTable">
+                            <thead><tr>
+                                <th>Org</th><th>Status</th><th>Priority</th><th>Max budget</th>
+                                <th>Last used</th><th>Updated</th>
+                            </tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============ USERS ============ -->
+            <section data-panel="users" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <h1>Users</h1>
+                        <p class="lede">Super-admins invite and remove other admins.</p>
+                    </div>
+                    <div class="panel-actions super-only">
+                        <button id="addUserBtn" class="btn btn-primary">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+                            Add admin
+                        </button>
+                    </div>
+                </div>
+
+                <div class="surface-card">
+                    <div class="surface-card-head">
+                        <h2>Roster</h2>
+                        <span class="sub" id="userCount">—</span>
+                    </div>
+                    <div class="surface-card-body flush">
+                        <table class="data" id="usersTable">
+                            <thead><tr>
+                                <th>ID</th><th>Email</th><th>Role</th><th>Created</th><th>Last login</th><th></th>
+                            </tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="modal" id="addUserModal" hidden>
+                    <form class="modal-card">
+                        <h3>Invite admin</h3>
+                        <label>Email
+                            <input type="email" name="email" autocomplete="off" required>
+                        </label>
+                        <label>Initial password (min 12 chars)
+                            <input type="password" name="password" autocomplete="new-password" minlength="12" required>
+                        </label>
+                        <p class="error" id="addUserErr"></p>
+                        <div class="modal-actions">
+                            <button type="button" data-close>Cancel</button>
+                            <button type="submit" class="btn-primary">Create</button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+
+            <!-- ============ SETTINGS ============ -->
+            <section data-panel="settings" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <h1>Settings</h1>
+                        <p class="lede">Stored encrypted in the dashboard database — never written to a plaintext file.</p>
+                    </div>
+                    <div class="panel-actions super-only">
+                        <button class="btn btn-ghost tab" data-tab="import">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                            Import CSV
+                        </button>
+                        <button id="saveSettingsBtn" class="btn btn-primary">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                            Save
+                        </button>
+                    </div>
+                </div>
+
+                <div class="warn-banner">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;margin-top:1px">
+                        <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+                    </svg>
+                    <div>
+                        <strong>Sensitive data warning.</strong>
+                        <span class="warn-text">Values are AES-GCM encrypted in the dashboard's SQLite store with a key kept outside the database. A web admin panel is still a larger attack surface than a private secrets manager — for production, prefer Vault / AWS Secrets Manager / 1Password Connect.</span>
+                    </div>
+                </div>
+
+                <div id="settingsForm"></div>
+
+                <!-- Save bar at the bottom of the form so the action is never
+                     pushed off-screen by a narrow viewport. -->
+                <div class="save-bar super-only" id="saveBarBottom">
+                    <span class="save-bar-status" id="saveBarStatus">All changes save to the encrypted dashboard database.</span>
+                    <button id="saveSettingsBtnBottom" class="btn btn-primary">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                        Save
+                    </button>
+                </div>
+            </section>
+
+            <!-- ============ IMPORT (full page, reached from Settings or sidebar) ============ -->
+            <section data-panel="import" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <h1>Import settings from CSV</h1>
+                        <p class="lede">Bulk-load credentials and card data from an org intake spreadsheet.</p>
+                    </div>
+                    <div class="panel-actions">
+                        <a href="/api/admin/settings/csv-template" class="btn btn-ghost">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                            Download template
+                        </a>
+                        <button class="btn btn-ghost tab" data-tab="settings">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                            Back to settings
+                        </button>
+                    </div>
+                </div>
+
+                <div class="warn-banner">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;margin-top:1px">
+                        <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+                    </svg>
+                    <div>
+                        <strong>How this works.</strong>
+                        <span class="warn-text">
+                            Org slot is inferred from the <code style="font-family:var(--font-mono);font-size:12px;color:var(--text)">organization_name</code>
+                            column (matches "reviving" or "hope"). Recognized columns are mapped to encrypted settings
+                            and saved to the dashboard database immediately on import.
+                        </span>
+                    </div>
+                </div>
+
+                <form id="csvForm" enctype="multipart/form-data" novalidate>
+                    <div class="dropzone" id="dropzone" tabindex="0">
+                        <input id="csvFile" name="file" type="file" accept=".csv,text/csv" hidden>
+                        <div class="dz-icon" aria-hidden="true">
+                            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="17 8 12 3 7 8"/>
+                                <line x1="12" y1="3" x2="12" y2="15"/>
+                            </svg>
+                        </div>
+                        <div class="dz-title">Drop a CSV here, or click to browse</div>
+                        <div class="dz-hint">UTF-8 / CP1252, 256 KB max</div>
+                        <div class="dz-filename" id="dzFilename" hidden></div>
+                    </div>
+
+                    <div class="import-actions">
+                        <button type="button" id="csvClearBtn" class="btn btn-ghost" hidden>Remove file</button>
+                        <button type="submit" id="csvSubmitBtn" class="btn btn-primary" disabled>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                            Import
+                        </button>
+                    </div>
+                    <p class="error" id="csvErr"></p>
+                </form>
+
+                <div class="surface-card" id="csvResultCard" hidden style="margin-top:var(--space-3)">
+                    <div class="surface-card-head">
+                        <h2>Import result</h2>
+                        <span class="sub" id="csvResultSummary"></span>
+                    </div>
+                    <div class="surface-card-body">
+                        <pre class="apply-output" id="csvResult" style="margin:0"></pre>
+                    </div>
+                </div>
+
+                <div class="surface-card" style="margin-top:var(--space-3)">
+                    <div class="surface-card-head">
+                        <h2>Recognized columns</h2>
+                        <span class="sub">everything else is ignored</span>
+                    </div>
+                    <div class="surface-card-body flush">
+                        <table class="data">
+                            <thead><tr>
+                                <th>CSV column</th><th>Maps to</th><th>Notes</th>
+                            </tr></thead>
+                            <tbody>
+                                <tr><td class="mono">organization_name</td><td class="mono">— (org selector)</td><td>Match: contains "reviving" or "hope"</td></tr>
+                                <tr><td class="mono">good360_username</td><td class="mono">GOOD360_&lt;ORG&gt;_EMAIL</td><td>—</td></tr>
+                                <tr><td class="mono">good360_password</td><td class="mono">GOOD360_&lt;ORG&gt;_PASSWORD</td><td>—</td></tr>
+                                <tr><td class="mono">full_name</td><td class="mono">CARD_&lt;ORG&gt;_NAME</td><td>cardholder name</td></tr>
+                                <tr><td class="mono">primary_card_network</td><td class="mono">CARD_&lt;ORG&gt;_TYPE</td><td>visa / mastercard / amex / discover</td></tr>
+                                <tr><td class="mono">primary_card_number</td><td class="mono">CARD_&lt;ORG&gt;_NUMBER</td><td>digits only</td></tr>
+                                <tr><td class="mono">primary_exp_date</td><td class="mono">CARD_&lt;ORG&gt;_EXPIRY</td><td>MM/YY · MM/YYYY · MMYY all accepted → MMYY</td></tr>
+                                <tr><td class="mono">primary_cvv</td><td class="mono">CARD_&lt;ORG&gt;_CVV</td><td>digits only</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============ AUDIT ============ -->
+            <section data-panel="audit" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <h1>Admin audit</h1>
+                        <p class="lede">Every privileged action recorded by this dashboard.</p>
+                    </div>
+                </div>
+
+                <div class="surface-card">
+                    <div class="surface-card-head">
+                        <h2>Recent activity</h2>
+                        <span class="sub">super-admin only</span>
+                    </div>
+                    <div class="surface-card-body flush">
+                        <table class="data" id="auditTable">
+                            <thead><tr>
+                                <th>Time</th><th>User</th><th>Action</th><th>Target</th><th>Detail</th><th>IP</th>
+                            </tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+        </div>
+    </div>
+</div>
+
+<script src="/static/admin.js"></script>
+</body>
+</html>

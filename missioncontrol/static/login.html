@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign in · Mission Control</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body class="auth-body">
+    <div class="auth-card">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:24px">
+            <div class="brand-mark" style="width:40px;height:40px;border-radius:10px">MC</div>
+            <div>
+                <div style="font-size:11px;font-family:var(--font-mono);color:var(--text-mute);text-transform:uppercase;letter-spacing:0.1em">Digital Excellence</div>
+                <div style="font-size:14px;font-weight:600;color:var(--text)">Mission Control</div>
+            </div>
+        </div>
+
+        <h1>Welcome back</h1>
+        <p class="auth-sub" id="subline">Sign in to continue.</p>
+
+        <form id="loginForm">
+            <label>Email
+                <input type="email" name="email" autocomplete="username" required>
+            </label>
+            <label>Password
+                <input type="password" name="password" autocomplete="current-password" required>
+            </label>
+            <button type="submit">Sign in</button>
+            <p class="error" id="err"></p>
+        </form>
+
+        <p class="auth-foot" id="registerLink" style="display:none">
+            <a href="/register">Set up the first super-admin →</a>
+        </p>
+    </div>
+
+    <script>
+    (async () => {
+        const state = await fetch('/api/auth/state').then(r => r.json()).catch(() => ({}));
+        if (state.registration_open) {
+            document.getElementById('registerLink').style.display = 'block';
+            document.getElementById('subline').textContent = 'No accounts yet — set up the first super-admin.';
+        }
+        if (state.authenticated) window.location = '/admin';
+    })();
+
+    document.getElementById('loginForm').addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        const f = ev.target;
+        const err = document.getElementById('err');
+        err.textContent = '';
+        const res = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({email: f.email.value, password: f.password.value}),
+        });
+        const j = await res.json().catch(() => ({}));
+        if (res.ok && j.success) {
+            window.location = '/admin';
+        } else {
+            err.textContent = j.error || 'Sign in failed';
+        }
+    });
+    </script>
+</body>
+</html>

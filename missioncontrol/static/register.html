@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>First-time setup · Mission Control</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body class="auth-body">
+    <div class="auth-card">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:24px">
+            <div class="brand-mark" style="width:40px;height:40px;border-radius:10px">MC</div>
+            <div>
+                <div style="font-size:11px;font-family:var(--font-mono);color:var(--text-mute);text-transform:uppercase;letter-spacing:0.1em">Digital Excellence</div>
+                <div style="font-size:14px;font-weight:600;color:var(--text)">Mission Control</div>
+            </div>
+        </div>
+
+        <h1>Create super-admin</h1>
+        <p class="auth-sub">
+            This is the only public registration. After this, additional admins
+            are created from the dashboard by the super-admin.
+        </p>
+
+        <form id="regForm">
+            <label>Email
+                <input type="email" name="email" autocomplete="username" required>
+            </label>
+            <label>Password (12+ characters)
+                <input type="password" name="password" autocomplete="new-password" minlength="12" required>
+            </label>
+            <label>Confirm password
+                <input type="password" name="confirm" autocomplete="new-password" minlength="12" required>
+            </label>
+            <button type="submit">Create super-admin</button>
+            <p class="error" id="err"></p>
+        </form>
+    </div>
+
+    <script>
+    (async () => {
+        const state = await fetch('/api/auth/state').then(r => r.json()).catch(() => ({}));
+        if (!state.registration_open) {
+            document.body.innerHTML =
+                '<div class="auth-card"><h1>Registration closed</h1>' +
+                '<p class="auth-sub">An account already exists. ' +
+                '<a href="/login">Sign in →</a></p></div>';
+        }
+    })();
+
+    document.getElementById('regForm').addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        const f = ev.target;
+        const err = document.getElementById('err');
+        err.textContent = '';
+        if (f.password.value !== f.confirm.value) {
+            err.textContent = 'Passwords do not match';
+            return;
+        }
+        const res = await fetch('/api/auth/register', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({email: f.email.value, password: f.password.value}),
+        });
+        const j = await res.json().catch(() => ({}));
+        if (res.ok && j.success) {
+            window.location = '/admin';
+        } else {
+            err.textContent = j.error || 'Registration failed';
+        }
+    });
+    </script>
+</body>
+</html>

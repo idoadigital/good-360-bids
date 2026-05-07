@@ -7,11 +7,21 @@ Updated to match Base44 Dashboard Integration Specification
 import json
 import os
 import subprocess
+import sys
 import time
 from datetime import datetime, timedelta
 from functools import wraps
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, redirect, request, send_from_directory
+
+# Make sibling modules importable when run as `python missioncontrol/server_v2.py`
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import auth as auth_mod  # noqa: E402
+from admin_routes import register_admin  # noqa: E402
+from db import has_any_user, init_db  # noqa: E402
+import quickbeed  # noqa: E402
+import secrets_store  # noqa: E402  (validates DASHBOARD_MASTER_KEY at import via first use)
 
 app = Flask(__name__, static_folder='static')
 
@@ -19,6 +29,14 @@ app = Flask(__name__, static_folder='static')
 API_KEY = os.environ.get('MISSIONCONTROL_API_KEY', '')
 if not API_KEY:
     raise RuntimeError('MISSIONCONTROL_API_KEY is not set — refuse to start with empty auth')
+
+# Validate the master encryption key at boot so we fail fast.
+try:
+    _ = secrets_store._load_master_key()  # type: ignore[attr-defined]
+except Exception as _exc:
+    raise RuntimeError(f'Dashboard cannot start: {_exc}') from _exc
+
+init_db()
 WORKDIR = os.environ.get('WORKDIR', '/a0/usr/workdir')
 CONFIG_FILE = f'{WORKDIR}/good360_checkout_config.json'
 CRON_LOG = f'{WORKDIR}/good360_cron.log'
@@ -30,20 +48,23 @@ STATE_FILE = f'{WORKDIR}/missioncontrol_state.json'
 # System start time for uptime calculation
 START_TIME = time.time()
 
-# Authentication decorator
+# Authentication decorator.
+# A request is authorized if EITHER it carries a valid X-API-Key header (for
+# server-to-server callers / scripts) OR it has a valid dashboard session
+# cookie (for browser users). Anonymous GETs are no longer permitted — that
+# bypass leaked operational data to anyone who could reach the port.
 def require_api_key(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         api_key = request.headers.get('X-API-Key')
-        # Allow GET requests without API key for read-only endpoints
-        if request.method == 'GET':
+        if api_key and api_key == API_KEY:
             return f(*args, **kwargs)
-        if api_key != API_KEY:
-            return jsonify({
-                'success': False,
-                'error': {'code': 'UNAUTHORIZED', 'message': 'Invalid or missing API key'}
-            }), 401
-        return f(*args, **kwargs)
+        if auth_mod.current_user():
+            return f(*args, **kwargs)
+        return jsonify({
+            'success': False,
+            'error': {'code': 'UNAUTHORIZED', 'message': 'Invalid or missing credentials'}
+        }), 401
     return decorated
 
 # Helper functions
@@ -105,6 +126,29 @@ def get_process_pid(name):
         return None
     except:
         return None
+
+
+HEARTBEAT_FILE = f'{WORKDIR}/good360_heartbeat.json'
+_MONITOR_STALE_AFTER = timedelta(minutes=int(os.environ.get('MONITOR_STALE_MINUTES', '5')))
+
+
+def monitor_alive_from_heartbeat():
+    # pgrep can't see the monitor process from inside this container (separate
+    # PID namespace). Heartbeat freshness is the ground truth for liveness.
+    try:
+        with open(HEARTBEAT_FILE) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False, None
+    raw_ts = data.get('last_success') or data.get('last_scan')
+    if not raw_ts:
+        return False, None
+    try:
+        ts = datetime.fromisoformat(raw_ts.replace('Z', '+00:00'))
+    except ValueError:
+        return False, raw_ts
+    now = datetime.now(ts.tzinfo) if ts.tzinfo else datetime.now()
+    return (now - ts) < _MONITOR_STALE_AFTER, raw_ts
 
 def is_process_running(name):
     return get_process_pid(name) is not None
@@ -170,17 +214,29 @@ def parse_log_line(line):
 
 @app.route('/')
 def index():
-    return send_from_directory('static', 'index.html')
+    """Root: send authenticated users to the legacy ops dashboard, anonymous
+    users to login (or register if no users exist yet)."""
+    if auth_mod.current_user():
+        return send_from_directory('static', 'index.html')
+    if not has_any_user():
+        return redirect('/register')
+    return redirect('/login')
 
 @app.route('/static/<path:path>')
 def serve_static(path):
     return send_from_directory('static', path)
+
+# Liveness probe — no auth, returns 200/JSON. Kept narrow on purpose.
+@app.route('/healthz', methods=['GET'])
+def liveness():
+    return jsonify({'status': 'ok'})
 
 # ============================================
 # API ENDPOINTS - Matching Base44 Spec
 # ============================================
 
 @app.route('/api/health', methods=['GET'])
+@require_api_key
 def health_check():
     """Health check - matches Base44 spec"""
     config = load_config()
@@ -200,18 +256,22 @@ def health_check():
     })
 
 @app.route('/api/status', methods=['GET'])
+@require_api_key
 def get_status():
     """Detailed system status - matches Base44 spec"""
     config = load_config()
     state = load_state()
 
-    # Get process statuses
-    monitor_running = is_process_running('good360_monitor.py')
+    # Liveness signals. Monitor lives in a sibling container, so pgrep can't
+    # see it — use heartbeat freshness instead. Bot/watchdog have no heartbeat
+    # yet; their pgrep checks will always be False in containerized deploys
+    # but are reported separately for visibility, not gating system status.
+    monitor_running, heartbeat_ts = monitor_alive_from_heartbeat()
     bot_running = is_process_running('good360_telegram_bot.py')
     watchdog_running = is_process_running('good360_watchdog.py')
 
-    # Get last scan time
-    last_scan = state.get('last_scan')
+    # Prefer the heartbeat timestamp over state.last_scan when available.
+    last_scan = heartbeat_ts or state.get('last_scan')
 
     # Count today's scans
     run_log = load_run_log()
@@ -228,13 +288,10 @@ def get_status():
         except:
             pass
 
-    # Determine overall system status
-    if monitor_running and bot_running:
-        system_status = 'healthy'
-    elif monitor_running or bot_running:
-        system_status = 'degraded'
-    else:
-        system_status = 'down'
+    # System status is driven by the monitor — that's the core function. Bot
+    # status is reported separately. Without a cross-container liveness probe
+    # for the bot we can't reliably degrade on it from in here.
+    system_status = 'healthy' if monitor_running else 'down'
 
     return jsonify({
         'system': {
@@ -328,6 +385,7 @@ def trigger_test():
         }), 500
 
 @app.route('/api/trucks', methods=['GET'])
+@require_api_key
 def get_trucks():
     """List detected trucks"""
     run_log = load_run_log()
@@ -359,6 +417,7 @@ def get_trucks():
     })
 
 @app.route('/api/logs', methods=['GET'])
+@require_api_key
 def get_logs():
     """Activity/event logs"""
     limit = request.args.get('limit', 50, type=int)
@@ -383,6 +442,7 @@ def get_logs():
     })
 
 @app.route('/api/alerts', methods=['GET'])
+@require_api_key
 def get_alerts():
     """Alert notifications"""
     limit = request.args.get('limit', 20, type=int)
@@ -413,6 +473,7 @@ def get_alerts():
     })
 
 @app.route('/api/transactions', methods=['GET'])
+@require_api_key
 def get_transactions():
     """Purchase history"""
     limit = request.args.get('limit', 20, type=int)
@@ -443,6 +504,7 @@ def get_transactions():
     })
 
 @app.route('/api/cooldown', methods=['GET'])
+@require_api_key
 def get_cooldown():
     """Cooldown status for all orgs"""
     config = load_config()
@@ -600,9 +662,69 @@ def log_activity(entry):
     with open(activity_log_file, 'w') as f:
         json.dump(logs, f, indent=2)
 
+# ============================================
+# ADMIN DASHBOARD (auth, users, settings, log views)
+# ============================================
+register_admin(app)
+
+
+@app.after_request
+def _security_headers(resp):
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault(
+        "Strict-Transport-Security",
+        "max-age=63072000; includeSubDomains",
+    )
+    return resp
+
+
+def _ssl_context():
+    """Return Flask ssl_context tuple if a cert pair exists; else None."""
+    cert = os.environ.get("DASHBOARD_TLS_CERT", "/app/workdir/tls/dashboard.crt")
+    key = os.environ.get("DASHBOARD_TLS_KEY", "/app/workdir/tls/dashboard.key")
+    if os.path.exists(cert) and os.path.exists(key):
+        return (cert, key)
+    return None
+
+
+def _start_quickbeed_poll_thread():
+    """Background fallback for missed webhooks. Runs forever; survives bad
+    QuickBeed config (just sleeps until config is set via the Settings UI)."""
+    import threading
+    import time as _time
+
+    def loop():
+        while True:
+            try:
+                cfg = quickbeed.get_config()
+                interval = cfg["poll_interval_s"]
+            except quickbeed.QuickBeedConfigError:
+                _time.sleep(60)
+                continue
+            try:
+                quickbeed.incremental_sync()
+            except Exception:
+                import traceback
+                traceback.print_exc()
+            _time.sleep(interval)
+
+    t = threading.Thread(target=loop, name="quickbeed-poll", daemon=True)
+    t.start()
+    print('🔄 QuickBeed poll thread started (incremental_sync every QUICKBEED_POLL_INTERVAL_SECONDS)')
+
+
 if __name__ == '__main__':
-    print('🚀 Starting Mission Control API v2 (Base44 Spec)...')
-    print('📊 Dashboard: http://localhost:5001')
-    print('🔗 API Base: http://localhost:5001/api')
-    print(f'🔑 API Key: {API_KEY[:4]}…{API_KEY[-4:]} (len={len(API_KEY)})')
-    app.run(host='0.0.0.0', port=5001, debug=False)
+    _start_quickbeed_poll_thread()
+    ssl_ctx = _ssl_context()
+    scheme = 'https' if ssl_ctx else 'http'
+    print('🚀 Starting Mission Control + Admin Dashboard...')
+    print(f'📊 Dashboard: {scheme}://0.0.0.0:5001')
+    print(f'🔗 API Base:  {scheme}://0.0.0.0:5001/api')
+    print(f'🔑 API Key (server-to-server): {API_KEY[:4]}…{API_KEY[-4:]} (len={len(API_KEY)})')
+    if ssl_ctx:
+        print(f'🔒 TLS: {ssl_ctx[0]}')
+    else:
+        print('⚠️  TLS cert not found — running plain HTTP. Set DASHBOARD_TLS_CERT/KEY for HTTPS.')
+    app.run(host='0.0.0.0', port=5001, debug=False, ssl_context=ssl_ctx)
