@@ -648,26 +648,64 @@ def _restart_compose_services() -> dict:
 # Scans, purchases, audit (read-only views)
 # ============================================================
 
+def _read_scans(limit: int) -> list[dict]:
+    """Return the most recent scans, preferring the SQL `scans` table.
+    Falls back to good360_run_log.json if SQL is empty (e.g., immediately
+    after migration before the monitor's next scan writes a row)."""
+    rows: list[dict] = []
+    try:
+        with get_conn() as c:
+            sql_rows = c.execute(
+                "SELECT ts, alert_sent, action, truck_count, available_count, "
+                "trucks_json FROM scans ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        for r in sql_rows:
+            try:
+                trucks = json.loads(r["trucks_json"] or "[]")
+            except (json.JSONDecodeError, TypeError):
+                trucks = []
+            rows.append({
+                "time":            r["ts"],
+                "alert_sent":      bool(r["alert_sent"]),
+                "action":          r["action"] or "",
+                "truck_count":     r["truck_count"],
+                "available_count": r["available_count"],
+                "trucks":          trucks,
+                # legacy aliases for the existing JS:
+                "title":  trucks[0]["name"] if trucks else None,
+                "status": "scanned",
+            })
+    except Exception:
+        rows = []
+    if rows:
+        return rows
+    # JSON fallback — old single-file format.
+    rl = _safe_json(RUN_LOG)
+    runs = rl.get("runs", rl) if isinstance(rl, dict) else (rl or [])
+    out: list[dict] = []
+    for entry in runs[-limit:][::-1]:
+        out.append({
+            "time":            entry.get("time"),
+            "alert_sent":      bool(entry.get("alert_sent")),
+            "action":          entry.get("action") or "",
+            "trucks":          entry.get("trucks") or [],
+            "truck_count":     len(entry.get("trucks") or []),
+            "available_count": sum(1 for t in (entry.get("trucks") or []) if t.get("available")),
+            "title":           (entry.get("trucks") or [{}])[0].get("name") if entry.get("trucks") else None,
+            "status":          "scanned",
+        })
+    return out
+
+
 @bp.route("/api/admin/scans", methods=["GET"])
 @auth.login_required
 def admin_scans():
-    """Recent scan activity. Reads heartbeat + run log + cron log."""
+    """Recent scan activity. Reads from the SQL scans table (preferred)
+    or the legacy good360_run_log.json file as a transitional fallback."""
     limit = request.args.get("limit", 100, type=int)
     heartbeat = _safe_json(HEARTBEAT)
-    run_log = _safe_json(RUN_LOG)
-    runs = run_log.get("runs", run_log) if isinstance(run_log, dict) else (run_log or [])
-
-    scans = []
-    for entry in runs[-limit:]:
-        scans.append({
-            "time": entry.get("time") or entry.get("detected_at"),
-            "org_id": entry.get("org_id"),
-            "title": entry.get("title") or entry.get("truck_title"),
-            "url": entry.get("url"),
-            "price": entry.get("price"),
-            "status": entry.get("status", "scanned"),
-            "login_ok": entry.get("login_ok"),
-        })
+    scans = _read_scans(limit)
 
     # Service status — true source of truth for "is the scanner alive".
     services = _docker_service_states([
@@ -1008,12 +1046,12 @@ def admin_analytics():
     cutoff = datetime.now(UTC) - timedelta(days=days)
 
     # ---------- scans + trucks ---------------------------------------------
-    rl = _safe_json(RUN_LOG)
-    raw_runs = rl.get("runs", rl) if isinstance(rl, dict) else (rl or [])
-
+    # Prefer the SQL scans table (no rewrite-amplification, queryable for
+    # longer windows) and fall back to the JSON file if SQL is empty.
     def _parse_run_time(s):
-        # Run log writes "YYYY-MM-DD HH:MM:SS" in local time. Treat as naive
-        # UTC for windowing — small skew vs ET is acceptable here.
+        # Stored timestamps may be ISO-8601 ("2026-05-07T15:14:35-04:00") or
+        # the older "YYYY-MM-DD HH:MM:SS" format. Treat naive timestamps as
+        # UTC — small ET skew is acceptable for analytics windowing.
         if not s:
             return None
         try:
@@ -1025,13 +1063,44 @@ def admin_analytics():
                 return None
 
     runs = []
-    for r in raw_runs:
-        ts = _parse_run_time(r.get("time"))
-        if ts and ts.tzinfo is None:
-            ts = ts.replace(tzinfo=UTC)
-        if ts is None or ts < cutoff:
-            continue
-        runs.append({"ts": ts, "raw": r})
+    sql_rows: list = []
+    try:
+        with get_conn() as _c:
+            sql_rows = _c.execute(
+                "SELECT ts, alert_sent, action, truck_count, available_count, "
+                "trucks_json FROM scans WHERE ts >= ? ORDER BY id ASC",
+                (cutoff.isoformat(timespec="seconds"),),
+            ).fetchall()
+    except Exception:
+        sql_rows = []
+    if sql_rows:
+        for r in sql_rows:
+            ts = _parse_run_time(r["ts"])
+            if not ts:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            try:
+                trucks = json.loads(r["trucks_json"] or "[]")
+            except (json.JSONDecodeError, TypeError):
+                trucks = []
+            raw = {
+                "time":       r["ts"],
+                "alert_sent": bool(r["alert_sent"]),
+                "action":     r["action"] or "",
+                "trucks":     trucks,
+            }
+            runs.append({"ts": ts, "raw": raw})
+    else:
+        rl = _safe_json(RUN_LOG)
+        raw_runs = rl.get("runs", rl) if isinstance(rl, dict) else (rl or [])
+        for r in raw_runs:
+            ts = _parse_run_time(r.get("time"))
+            if ts and ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            if ts is None or ts < cutoff:
+                continue
+            runs.append({"ts": ts, "raw": r})
 
     scan_count = len(runs)
     truck_observations = sum(len(r["raw"].get("trucks") or []) for r in runs)
@@ -1589,6 +1658,26 @@ def create_test_run():
     if not (3 <= len(cvv) <= 4): errors.append("card_cvv must be 3 or 4 digits")
     if errors:
         return jsonify({"success": False, "error": "; ".join(errors)}), 400
+
+    # Rate limit: cap at TEST_RUN_HOURLY_LIMIT runs in the trailing 60 minutes
+    # so accidental Run-test mashing can't hammer the master Good360 account.
+    # The limit counts every status — queued / running / completed / failed —
+    # since each one represents an attempt that touched (or will touch) the
+    # account. Default 3/hour; override via env.
+    hourly_cap = max(1, int(os.environ.get("TEST_RUN_HOURLY_LIMIT", "3")))
+    with get_conn() as c:
+        recent = c.execute(
+            "SELECT COUNT(*) AS n, MIN(ts) AS earliest "
+            "FROM test_runs WHERE ts >= datetime('now', '-1 hour')"
+        ).fetchone()
+    if (recent["n"] or 0) >= hourly_cap:
+        return jsonify({
+            "success": False,
+            "error": (f"Rate limit: {hourly_cap} test runs per hour. "
+                      f"Earliest in the current window started at {recent['earliest']} UTC. "
+                      f"Wait until that row falls out of the trailing hour, "
+                      f"or raise TEST_RUN_HOURLY_LIMIT in Settings."),
+        }), 429
 
     brand = _classify_card(pan)
     last4 = pan[-4:]

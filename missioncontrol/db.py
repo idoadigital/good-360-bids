@@ -194,6 +194,25 @@ CREATE TABLE IF NOT EXISTS good360_login_attempts (
     error       TEXT                  -- exception/page text on failure
 );
 CREATE INDEX IF NOT EXISTS idx_g360_login_ts ON good360_login_attempts(ts);
+
+-- ============================================================
+-- Scans: one row per monitor scan. Replaces the rewrite-on-every-
+-- scan good360_run_log.json file as the source of truth for
+-- analytics. The trucks observed in each scan are stored as a
+-- denormalized JSON blob — fine for our query volumes, and avoids
+-- a child table and join for every analytics request.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS scans (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT NOT NULL,            -- when the scan started (ISO-8601)
+    alert_sent   INTEGER NOT NULL DEFAULT 0,
+    action       TEXT,                     -- e.g. 'auto_buy_attempt', empty if no-op
+    truck_count  INTEGER NOT NULL DEFAULT 0,
+    available_count INTEGER NOT NULL DEFAULT 0,
+    trucks_json  TEXT NOT NULL DEFAULT '[]'  -- list of {name, available, tracked}
+);
+CREATE INDEX IF NOT EXISTS idx_scans_ts ON scans(ts);
 """
 
 

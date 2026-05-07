@@ -586,143 +586,21 @@ def run_checkout_sequence(org: OrgContext, truck: TruckContext,
             error_message=None,
         )
 
-    # Production checkout via Chrome DevTools MCP agent.
-    # The agent uses the QuickBeed-supplied org credentials + the per-customer
-    # payment card we just selected. Falls through to the legacy browser-agent
-    # path on import failure so production isn't dead if the SDK is missing.
+    # Production checkout via Chrome DevTools MCP agent. There is no
+    # fallback: the previous browser_agent path imported a module that no
+    # longer ships in the image, so any "fallback" was guaranteed to crash.
+    # If MCP is unavailable we surface that as a failed_checkout with a
+    # clear error_message so the operator notices and re-installs the SDK.
     try:
         return _run_checkout_via_devtools_mcp(org, truck, payment_card)
     except _DevToolsMCPUnavailable as exc:
-        logger.warning(
-            "DevTools MCP unavailable (%s) — falling back to legacy browser_agent path",
-            exc,
-        )
-
-    # Prepare browser agent message (legacy fallback, only reached if MCP import fails)
-    checkout_data = {
-        "good360_email":    org.good360_email,
-        "good360_password": org.good360_password,
-        "truck_url":        truck.truck_url,
-        "truck_title":      truck.truck_title,
-        "card_number":      payment_card["card_number"],
-        "card_expiry":      f"{payment_card['card_expiry_month']:02d}/{payment_card['card_expiry_year']}",
-        "card_cvv":         payment_card["card_cvv"],
-        "card_holder":      payment_card["card_holder_name"],
-        "billing_zip":      payment_card["billing_zip"],
-        "addresses":        org.addresses,
-        "checkout_answers": org.checkout_answers,
-        "org_name":         org.org_name,
-        "org_id":           org.org_id,
-    }
-
-    # Save checkout data to temp file for browser agent
-    checkout_payload = json.dumps(checkout_data, indent=2)
-    payload_file = DOWNLOAD_DIR / f"checkout_payload_org{org.org_id}_truck{truck.truck_event_id}.json"
-    payload_file.write_text(checkout_payload)
-
-    # Call browser_agent to do the checkout
-
-    browser_message = f"""
-Execute a Good360 truck purchase checkout sequence.
-
-## Payload File (read first):
-{payload_file}
-
-## Steps:
-1. Open browser at https://www.good360.org
-2. If already logged in, logout first
-3. Login with the good360_email and good360_password from payload
-4. Navigate to the truck_url from payload
-5. If truck is no longer available, log "TRUCK_UNAVAILABLE" and end task with error
-6. Fill in checkout question answers (from checkout_answers in payload)
-7. Select shipping address (first primary address from payload)
-8. Enter payment card details:
-   - Card number: {{card_number}}
-   - Expiry: {{card_expiry}}
-   - CVV: {{card_cvv}}
-   - Cardholder: {{card_holder}}
-   - Billing ZIP: {{billing_zip}}
-9. Submit order
-10. Wait for confirmation page
-11. Capture:
-    - Confirmation number
-    - Order total
-    - Screenshot of confirmation (save to {DOWNLOAD_DIR})
-12. End task with confirmation details as JSON:
-    {{"success": true, "confirmation_number": "...", "order_total": ...}}
-
-If checkout fails at any step:
-- Capture screenshot (save to {DOWNLOAD_DIR})
-- End task with error details as JSON:
-  {{"success": false, "error": "...", "failed_step": "...", "screenshot_path": "..."}}
-"""
-
-    # Use call_subordinate to invoke browser_agent for checkout
-    # Note: browser_agent is called via a2a or direct call
-    result = _call_browser_checkout(browser_message, org.org_id, truck.truck_event_id)
-
-    return result
-
-
-def _call_browser_checkout(message: str, org_id: int, truck_event_id: int) -> CheckoutResult:
-    """
-    Call the browser agent to perform checkout.
-    Uses browser_agent tool directly.
-    """
-    # Store message for browser_agent to pick up
-    msg_file = DOWNLOAD_DIR / f"checkout_msg_org{org_id}_truck{truck_event_id}.txt"
-    msg_file.write_text(message)
-
-    # Use the browser_agent tool
-    from browser_agent import browser_agent as _browser_agent_call
-
-    try:
-        response = _browser_agent_call(
-            message=message,
-            reset=True,
-        )
-
-        # Parse response
-        if isinstance(response, str):
-            response_text = response
-        else:
-            response_text = str(response)
-
-        # Try to extract JSON result
-        import re
-        json_match = re.search(r'\{[^{}]*"success"[^{}]*\}', response_text, re.DOTALL)
-        if json_match:
-            result = json.loads(json_match.group())
-            return CheckoutResult(
-                success=result.get("success", False),
-                status="success" if result.get("success") else "failed_checkout",
-                mode="auto_buy",
-                confirmation_number=result.get("confirmation_number"),
-                order_total=result.get("order_total"),
-                error_message=result.get("error"),
-                screenshot_path=result.get("screenshot_path"),
-            )
-        else:
-            if "TRUCK_UNAVAILABLE" in response_text or "unavailable" in response_text.lower():
-                return CheckoutResult(
-                    success=False,
-                    status="truck_gone",
-                    mode="auto_buy",
-                    error_message="Truck no longer available",
-                )
-            return CheckoutResult(
-                success=False,
-                status="failed_checkout",
-                mode="auto_buy",
-                error_message=response_text[:500],
-            )
-    except Exception as e:
-        logger.error(f"Browser checkout error: {e}")
+        logger.error("DevTools MCP unavailable: %s", exc)
         return CheckoutResult(
-            success=False,
-            status="failed_checkout",
-            mode="auto_buy",
-            error_message=str(e),
+            success=False, status="failed_checkout", mode="auto_buy",
+            error_message=f"[MCP] DevTools agent unavailable: {exc} "
+                          f"(check that openai-agents + chrome-devtools-mcp "
+                          f"are installed and good360_devtools_agent is "
+                          f"importable)",
         )
 
 

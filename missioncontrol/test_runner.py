@@ -162,6 +162,13 @@ def _execute_via_agent(
             ),
         }
 
+    # Auto-derive truck title from the page so the agent's "do not buy a
+    # different truck" safety rule has a real name to match against.
+    # Best-effort: a fetch failure isn't fatal — we just hand the agent a
+    # generic name and let it report whatever it finds.
+    _update_test_run(test_id, result_summary="scraping truck title from page…")
+    truck_name = _scrape_truck_title(truck_url) or "any available truck on the supplied URL"
+
     _update_test_run(test_id, result_summary="building agent prompt…")
 
     # Synthetic "org" override carrying the master login + the form's test card
@@ -211,8 +218,8 @@ def _execute_via_agent(
     # event loop. Long-running: 1–5 minutes for a full checkout.
     try:
         result = asyncio.run(_agent.run_agent(
-            org_key="testbuy",          # purely informational; org_override bypasses _load_org
-            truck_name="Mission Control test buy",
+            org_key="testbuy",       # purely informational; org_override bypasses _load_org
+            truck_name=truck_name,    # scraped from the page above
             truck_url=truck_url,
             admin_fee=0.0,
             dry_run=dry_run,
@@ -228,6 +235,20 @@ def _execute_via_agent(
             "summary": f"agent crashed: {type(e).__name__}",
             "error": traceback.format_exc(),
         }
+
+    # Capture an end-of-run screenshot. The MCP agent's result schema
+    # doesn't include images, so we open the truck URL one more time
+    # (logged in) and snap a full-page PNG. Best-effort.
+    _update_test_run(test_id, result_summary="capturing end-of-run screenshot…")
+    shot_relpath = _capture_screenshot(test_id, getattr(result, "final_url", None) or truck_url)
+    if shot_relpath:
+        _update_test_run(test_id, screenshot_path=shot_relpath)
+
+    # Best-effort cart cleanup so the master account doesn't accumulate
+    # test trucks. Runs whether the test succeeded or failed. Failure here
+    # is a warning, not a test failure.
+    _update_test_run(test_id, result_summary="cleaning master account cart…")
+    _cart_cleanup_safe()
 
     # Normalize the CheckoutAgentResult into our test_runs row shape.
     agent_status = (getattr(result, "status", None) or "FAILED").upper()
@@ -258,3 +279,183 @@ def _execute_via_agent(
     #   answer from Good360); failure is the *checkout* outcome, not the
     #   *test* outcome.
     return {"status": "completed", "summary": summary, "error": error_blob}
+
+
+def _scrape_truck_title(url: str) -> str | None:
+    """Open the URL with Playwright, login if needed, and return the truck
+    title. Best-effort — returns None on any failure so the caller falls
+    back to a generic name."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None
+
+    email = os.environ.get("SCAN_GOOD360_EMAIL", "").strip()
+    password = os.environ.get("SCAN_GOOD360_PASSWORD", "").strip()
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(viewport={"width": 1280, "height": 900})
+            page = context.new_page()
+            page.set_default_timeout(20_000)
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+                # Some Good360 pages require auth before showing the title.
+                # If we land on a login page, log in then re-navigate.
+                if email and password:
+                    try:
+                        if page.locator('input[placeholder*="email" i]').count() > 0:
+                            page.fill('input[placeholder*="email" i]', email)
+                            page.fill('input[placeholder*="password" i]', password)
+                            page.click('button:has-text("Sign in"), button:has-text("Log in"), button[type="submit"]', timeout=8_000)
+                            page.wait_for_load_state("networkidle", timeout=10_000)
+                            page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+                    except Exception:
+                        pass
+                # Try a few selectors in priority order.
+                for sel in (
+                    "h1",
+                    '[data-testid="product-title"]',
+                    ".product-title",
+                    ".item-title",
+                    "h2",
+                ):
+                    try:
+                        loc = page.locator(sel)
+                        if loc.count() == 0:
+                            continue
+                        text = (loc.first.inner_text(timeout=2_000) or "").strip()
+                        if text and "amazon" in text.lower() and "truckload" in text.lower():
+                            return text[:200]
+                        if text and len(text) > 5 and len(text) < 200:
+                            # Plausible title even without the magic words.
+                            return text
+                    except Exception:
+                        continue
+                # Last resort: page <title>.
+                title = (page.title() or "").strip()
+                return title[:200] if title else None
+            finally:
+                browser.close()
+    except Exception:
+        return None
+
+
+def _cart_cleanup_safe() -> None:
+    """Open Good360 cart, remove every line item. Best-effort — silently
+    ignores failures. Logs to the runner's caller via stdout for visibility."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return
+
+    email = os.environ.get("SCAN_GOOD360_EMAIL", "").strip()
+    password = os.environ.get("SCAN_GOOD360_PASSWORD", "").strip()
+    if not (email and password):
+        return
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(viewport={"width": 1280, "height": 900})
+            page = context.new_page()
+            page.set_default_timeout(20_000)
+            try:
+                # Login first (cart pages 401 without auth).
+                page.goto("https://catalog.good360.org/marketplace/home", wait_until="networkidle", timeout=20_000)
+                try:
+                    page.click("text=Login", timeout=5_000)
+                    page.wait_for_selector('input[placeholder*="email" i]', state="visible", timeout=8_000)
+                    page.fill('input[placeholder*="email" i]', email)
+                    page.fill('input[placeholder*="password" i]', password)
+                    page.click('button:has-text("Sign in"), button:has-text("Log in"), button[type="submit"]', timeout=8_000)
+                    page.wait_for_load_state("networkidle", timeout=10_000)
+                except Exception:
+                    pass
+
+                # Navigate to cart and remove items. Selectors mirror the
+                # ones used in good360_autobuy.py's cart navigation.
+                for cart_url in (
+                    "https://marketplace.good360.org/cart",
+                    "https://catalog.good360.org/marketplace/checkout/cart",
+                ):
+                    try:
+                        page.goto(cart_url, wait_until="domcontentloaded", timeout=15_000)
+                    except Exception:
+                        continue
+                    # Click each visible "Remove" / trash icon up to 10 times.
+                    for _ in range(10):
+                        clicked = False
+                        for sel in ('button:has-text("Remove")', 'a:has-text("Remove")',
+                                    'button[aria-label*="remove" i]',
+                                    'button:has-text("Delete")',
+                                    '[data-action="remove"]'):
+                            try:
+                                btn = page.locator(sel)
+                                if btn.count() > 0:
+                                    btn.first.click(timeout=3_000)
+                                    page.wait_for_load_state("networkidle", timeout=5_000)
+                                    clicked = True
+                                    break
+                            except Exception:
+                                continue
+                        if not clicked:
+                            break
+            finally:
+                browser.close()
+    except Exception:
+        # Cleanup is best-effort — never let it break the test outcome.
+        return
+
+
+def _capture_screenshot(test_id: int, target_url: str) -> str | None:
+    """Open `target_url` in a fresh logged-in Playwright session and snap
+    a full-page screenshot. Returns the workdir-relative path, or None on
+    any failure. Best-effort — never raises."""
+    if not target_url:
+        return None
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None
+
+    email = os.environ.get("SCAN_GOOD360_EMAIL", "").strip()
+    password = os.environ.get("SCAN_GOOD360_PASSWORD", "").strip()
+
+    shot_dir = Path(WORKDIR) / "test_run_screenshots"
+    try:
+        shot_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    import time as _time
+    shot_path = shot_dir / f"test_{test_id}_{int(_time.time())}.png"
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(viewport={"width": 1280, "height": 900})
+            page = context.new_page()
+            page.set_default_timeout(20_000)
+            try:
+                page.goto(target_url, wait_until="domcontentloaded", timeout=20_000)
+                # If we hit a login wall, log in then re-navigate.
+                if email and password:
+                    try:
+                        if page.locator('input[placeholder*="email" i]').count() > 0:
+                            page.fill('input[placeholder*="email" i]', email)
+                            page.fill('input[placeholder*="password" i]', password)
+                            page.click('button:has-text("Sign in"), button:has-text("Log in"), button[type="submit"]', timeout=8_000)
+                            page.wait_for_load_state("networkidle", timeout=10_000)
+                            page.goto(target_url, wait_until="domcontentloaded", timeout=20_000)
+                    except Exception:
+                        pass
+                page.screenshot(path=str(shot_path), full_page=True)
+            finally:
+                browser.close()
+    except Exception:
+        return None
+
+    try:
+        return str(shot_path.relative_to(Path(WORKDIR)))
+    except ValueError:
+        return None

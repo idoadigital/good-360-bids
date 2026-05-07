@@ -54,6 +54,11 @@ services:
     env_file: .env
     volumes:
       - workdir:/app/workdir
+      # Bind-mount the moving Python so settings_bootstrap + token guard
+      # land without an image rebuild.
+      - ./good360_telegram_bot.py:/app/good360_telegram_bot.py:ro
+      - ./settings_bootstrap.py:/app/settings_bootstrap.py:ro
+      - ./missioncontrol:/app/missioncontrol:ro
 
   missioncontrol:
     image: good360-monitor:local

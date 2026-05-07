@@ -237,22 +237,45 @@ def save_log(log):
         json.dump(log, f, indent=2)
 
 def append_run_log(timestamp, trucks, alert_sent, action=""):
+    # Continue to update the legacy JSON file for back-compat with any code
+    # that still reads it directly (the dashboard's analytics + scans
+    # endpoints prefer the SQL `scans` table when present, and only fall
+    # back to JSON if the SQL path returns nothing).
     log = load_log()
-    # Safeguard: if log structure invalid, rebuild it
     if not isinstance(log, dict) or 'runs' not in log:
         print('⚠️ Detected malformed log structure — auto‑rebuilding good360_run_log.json')
         log = { 'runs': [] }
+    truck_rows = [
+        {"name": t["name"], "available": t["available"], "tracked": t["tracked"]}
+        for t in trucks
+    ]
     run_entry = {
         "time": timestamp,
         "alert_sent": alert_sent,
         "action": action,
-        "trucks": [
-            {"name": t["name"], "available": t["available"], "tracked": t["tracked"]}
-            for t in trucks
-        ]
+        "trucks": truck_rows,
     }
     log["runs"].append(run_entry)
     save_log(log)
+
+    # SQL mirror — durable, no rewrite-amplification, queryable for analytics.
+    # Best-effort: a DB failure must never break the scan.
+    try:
+        import sys as _sys
+        if "/app/missioncontrol" not in _sys.path:
+            _sys.path.insert(0, "/app/missioncontrol")
+        from db import get_conn as _get_conn  # type: ignore
+        avail = sum(1 for t in truck_rows if t.get("available"))
+        with _get_conn() as _c:
+            _c.execute(
+                """INSERT INTO scans (ts, alert_sent, action, truck_count,
+                                       available_count, trucks_json)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (str(timestamp), 1 if alert_sent else 0, action or "",
+                 len(truck_rows), avail, json.dumps(truck_rows)),
+            )
+    except Exception as _exc:
+        print(f"⚠️ SQL scan mirror failed (non-fatal): {_exc}")
 
 # ============================================================
 # WATCHDOG HEARTBEAT

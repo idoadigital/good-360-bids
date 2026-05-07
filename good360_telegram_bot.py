@@ -14,6 +14,12 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # === CONFIG ===
+# Hydrate Telegram credentials from the encrypted dashboard Settings store
+# before reading them. Without this, env-only deploys can't see the token.
+try:
+    import settings_bootstrap  # noqa: F401
+except Exception:
+    pass
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 if not TELEGRAM_TOKEN:
     # Bot is optional — if no token is configured, idle the container so it

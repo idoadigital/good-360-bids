@@ -37,6 +37,12 @@ _KEYS_TO_LOAD = (
     "TELEGRAM_GROUP_HOPE4HUMANITY",
     "TELEGRAM_GROUP_REVIVING_HOMES",
     "TELEGRAM_OPERATOR_CHAT_ID",
+    # Autobuy + DevTools agent safety flags. The operator manages these
+    # through Settings; `_validate_purchase_context` and the QB dry-run gate
+    # in autobuy_v2 read them from os.environ at purchase time.
+    "QUICKBEED_DRY_RUN",
+    "DEVTOOLS_AGENT_ALLOW_LIVE_PURCHASE",
+    "DEVTOOLS_AGENT_ALLOW_SECRETS_TO_MODEL",
 )
 
 
