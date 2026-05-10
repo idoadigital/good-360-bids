@@ -2,16 +2,18 @@
 """Good360 Watchdog - FIXED VERSION with proper ET timezone handling"""
 import json
 import os
-import subprocess
 from datetime import datetime
 
 import pytz
 import requests
 
 # Config
-STATE_FILE = 'good360_watchdog_state.json'
-CRON_LOG = 'good360_cron.log'
-ALERT_LOG = 'good360_watchdog_alerts.log'
+# All state lives in the shared workdir volume so the watchdog (which has no
+# access to the monitor container's filesystem) can read what monitor writes.
+WORKDIR = os.environ.get('WORKDIR', '/app/workdir')
+STATE_FILE = f'{WORKDIR}/good360_watchdog_state.json'
+HEARTBEAT_FILE = f'{WORKDIR}/good360_heartbeat.json'
+ALERT_LOG = f'{WORKDIR}/good360_watchdog_alerts.log'
 MAX_STALE_MINUTES = 5
 ET = pytz.timezone('America/New_York')
 
@@ -55,25 +57,31 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 def get_last_scan_minutes_ago():
-    """Get minutes since last scan - properly handling ET timezone"""
+    """Read minutes-since-last-scan from the heartbeat file.
+
+    The monitor writes good360_heartbeat.json to the shared workdir volume on
+    every successful scan. Older versions of this watchdog tailed
+    good360_cron.log, which lived only in the monitor container's ephemeral
+    filesystem and was therefore unreadable from here — leading to permanent
+    "Unknown / 9999 min ago" reports.
+    """
     try:
-        result = subprocess.run(
-            ['tail', '-200', CRON_LOG],
-            capture_output=True, text=True, timeout=5
-        )
-        for line in reversed(result.stdout.split('\n')):
-            if 'Checking Good360' in line:
-                import re
-                match = re.search(r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]', line)
-                if match:
-                    # Parse as naive datetime (log timestamps are in ET)
-                    last_dt = datetime.strptime(match.group(1), '%Y-%m-%d %H:%M:%S')
-                    # Get current ET as naive for comparison
-                    now_et = datetime.now(ET).replace(tzinfo=None)
-                    minutes_ago = int((now_et - last_dt).total_seconds() / 60)
-                    return minutes_ago, match.group(1)
+        with open(HEARTBEAT_FILE) as f:
+            data = json.load(f)
+        raw_ts = data.get('last_success') or data.get('last_scan')
+        if not raw_ts:
+            return 9999, 'Unknown'
+        ts = datetime.fromisoformat(raw_ts.replace('Z', '+00:00'))
+        if ts.tzinfo is None:
+            ts = ET.localize(ts)
+        ts_et = ts.astimezone(ET)
+        now_et = datetime.now(ET)
+        minutes_ago = int((now_et - ts_et).total_seconds() / 60)
+        return minutes_ago, ts_et.strftime('%Y-%m-%d %H:%M:%S')
+    except FileNotFoundError:
+        print(f"[WATCHDOG] Heartbeat file missing: {HEARTBEAT_FILE}")
     except Exception as e:
-        print(f"[WATCHDOG] Error reading log: {e}")
+        print(f"[WATCHDOG] Error reading heartbeat: {e}")
     return 9999, 'Unknown'
 
 def main():
@@ -117,4 +125,17 @@ def main():
             save_state(state)
 
 if __name__ == '__main__':
-    main()
+    # Long-lived loop. Previously this script exited after each check and
+    # relied on `restart: always` to re-launch — wasteful and made the
+    # container's "Restarting" status indistinguishable from a real fault.
+    import time
+    CHECK_INTERVAL = int(os.environ.get('WATCHDOG_INTERVAL_SECONDS', '60'))
+    while True:
+        try:
+            main()
+        except KeyboardInterrupt:
+            print('[WATCHDOG] Interrupted, exiting')
+            break
+        except Exception as e:
+            print(f'[WATCHDOG] Unhandled error: {e}')
+        time.sleep(CHECK_INTERVAL)

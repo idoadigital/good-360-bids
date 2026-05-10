@@ -54,6 +54,14 @@ SMTP_USER = os.environ.get("ALERT_EMAIL_FROM", "")
 SMTP_PASS = os.environ.get("SMTP_PASSWORD", "")
 ALERT_TO = [e.strip() for e in os.environ.get("ALERT_EMAIL_TO", "").split(",") if e.strip()]
 
+
+def _gmail_conn():
+    # Submission port (587 + STARTTLS). The hosting provider blocks the
+    # legacy SMTPS port (465), so SMTP_SSL fails with ENETUNREACH.
+    server = smtplib.SMTP("smtp.gmail.com", 587, timeout=15)
+    server.starttls()
+    return server
+
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
 # Multi-org Telegram groups (values from .env)
@@ -317,7 +325,7 @@ def send_error_alert(error_message):
 
     msg.attach(MIMEText(html, "html"))
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        with _gmail_conn() as server:
             server.login(SMTP_USER, SMTP_PASS)
             server.sendmail(SMTP_USER, ALERT_TO, msg.as_string())
         log_cron("Error alert email sent")
@@ -460,7 +468,7 @@ style='background:#27ae60;color:white;padding:12px 24px;text-decoration:none;bor
 <br><p style='color:#888;font-size:12px;'>Detected at: """ + now_str + """ - E-Comsetter Good360 Monitor</p>
 </div></body></html>"""
     msg.attach(MIMEText(html, "html"))
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+    with _gmail_conn() as server:
         server.login(SMTP_USER, SMTP_PASS)
         server.sendmail(SMTP_USER, ALERT_TO, msg.as_string())
     print("Alert email sent for: " + str([t["name"] for t in available_trucks]))
@@ -548,7 +556,7 @@ def send_urgent_manual_alert(truck_name, admin_fee, truck_url):
     msg["From"] = SMTP_USER
     msg["To"] = ", ".join(ALERT_TO)
     msg.attach(MIMEText(html, "html"))
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+    with _gmail_conn() as server:
         server.login(SMTP_USER, SMTP_PASS)
         server.sendmail(SMTP_USER, ALERT_TO, msg.as_string())
     tg_msg = "URGENT - MANUAL PURCHASE REQUIRED\n\nAdmin fee exceeds auto-pay limit!\n\nTruck: " + truck_name + "\nAdmin Fee: $" + str(admin_fee) + "\nAuto-Pay Limit: $5,500\nDetected: " + now + "\n\nGO BUY MANUALLY NOW:\n" + truck_url + "\n\n- E-Comsetter Good360 Monitor"
@@ -625,7 +633,7 @@ def send_purchase_confirmation(truck_name, admin_fee, org_name=None, details=Non
     msg["From"] = SMTP_USER
     msg["To"] = ", ".join(ALERT_TO)
     msg.attach(MIMEText(html, "html"))
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+    with _gmail_conn() as server:
         server.login(SMTP_USER, SMTP_PASS)
         server.sendmail(SMTP_USER, ALERT_TO, msg.as_string())
     org_text = ("\nOrganization: " + org_name) if org_name else ""
@@ -672,7 +680,7 @@ def send_checkout_failure_alert(truck_name, truck_url, status, message, org_name
     msg["To"] = ", ".join(ALERT_TO)
     msg.attach(MIMEText(html, "html"))
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        with _gmail_conn() as server:
             server.login(SMTP_USER, SMTP_PASS)
             server.sendmail(SMTP_USER, ALERT_TO, msg.as_string())
     except Exception as e:
@@ -1034,12 +1042,20 @@ def main():
                 truck_name = truck["name"]
                 truck_url = truck.get("url", GOOD360_URL)
 
-                # 1. ALERT-FIRST: Send availability alert BEFORE auto-buy
+                # 1. ALERT-FIRST: Send availability alert BEFORE auto-buy.
+                # Email and Telegram are independent fallbacks — never let one
+                # failure block the other or crash the scan loop.
                 print(f"  [ALERT-FIRST] Sending availability alert for {truck_name}...")
-                send_alert_email([truck],
-                    extra_note="Truck is available. Auto-buy will be attempted if applicable.")
-                send_telegram_alert([truck],
-                    extra_note="Truck available. Auto-buy will be attempted if applicable.")
+                try:
+                    send_alert_email([truck],
+                        extra_note="Truck is available. Auto-buy will be attempted if applicable.")
+                except Exception as e:
+                    log_cron(f"WARN: email alert failed for {truck_name}: {e}")
+                try:
+                    send_telegram_alert([truck],
+                        extra_note="Truck available. Auto-buy will be attempted if applicable.")
+                except Exception as e:
+                    log_cron(f"WARN: telegram alert failed for {truck_name}: {e}")
                 log_cron(f"Alert sent for {truck_name}")
 
                 # 2. MULTI-ORG AUTO-BUY: Find which org should buy this truck
@@ -1244,5 +1260,21 @@ def main():
         return f"ERROR: {str(e)}"
 
 if __name__ == "__main__":
-    result = main()
-    print("Result: " + result)
+    # Run as a long-lived process: one Chromium boot, repeated scans on a
+    # fixed interval. Previously this script exited after each scan and relied
+    # on `restart: always` to re-launch — which cold-started Playwright ~880
+    # times/day and made real crashes indistinguishable from normal cycling.
+    SCAN_INTERVAL = int(os.environ.get("MONITOR_INTERVAL_SECONDS", "60"))
+    while True:
+        try:
+            result = main()
+            print("Result: " + result)
+        except KeyboardInterrupt:
+            print("[MONITOR] Interrupted, exiting")
+            break
+        except Exception as e:
+            # main() already catches and reports its own errors; this is the
+            # last-resort guard so a bug here can't kill the loop silently.
+            print(f"[MONITOR] Unhandled error in scan loop: {e}")
+            traceback.print_exc()
+        time.sleep(SCAN_INTERVAL)
