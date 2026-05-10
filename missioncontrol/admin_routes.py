@@ -612,10 +612,14 @@ def _write_env_file() -> list[str]:
         for k in new_keys:
             out_lines.append(f"{k}={plain[k]}")
 
-    tmp = ENV_FILE.with_suffix(".env.tmp")
-    tmp.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
-    os.chmod(tmp, 0o600)
-    tmp.replace(ENV_FILE)
+    # Write in place. We can't use the usual temp-file + atomic rename pattern
+    # because docker-compose mounts this .env as a single-file bind mount —
+    # rename() over a bind-mounted file fails with EBUSY (the kernel won't
+    # swap the inode the bind mount is pinned to). The write is small and
+    # only triggered by an explicit operator Apply, so the brief
+    # non-atomic window is acceptable.
+    ENV_FILE.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+    os.chmod(ENV_FILE, 0o600)
     return sorted(plain.keys())
 
 
@@ -629,7 +633,10 @@ def _restart_compose_services() -> dict:
         return {"ok": False, "reason": "docker socket / cli not available; restart manually"}
 
     services = ["monitor", "daemon", "watchdog", "telegram-bot", "intake"]
-    cmd = ["docker", "compose", "-f", "/app/docker-compose.yml", "restart", *services]
+    # `up -d` (not `restart`) — `restart` reuses the existing container, which
+    # was created with the OLD env_file. We need compose to recreate the
+    # containers so the freshly-written .env is read at container creation.
+    cmd = ["docker", "compose", "-f", "/app/docker-compose.yml", "up", "-d", *services]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd="/app")
         return {
