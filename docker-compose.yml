@@ -98,6 +98,14 @@ services:
       # docker socket grants effective host root to anything in this
       # container — keep the dashboard's auth strong.
       - /var/run/docker.sock:/var/run/docker.sock
+      # The dashboard's Apply step invokes `docker compose up -d` so sibling
+      # containers re-read .env at recreation time. Compose's relative bind
+      # mounts (e.g. ./settings_bootstrap.py) are sent to the daemon as paths
+      # the daemon resolves on the HOST. Mounting the project root at the
+      # same host path inside this container lets compose's --project-directory
+      # produce paths that exist on both sides. Read-only is enough — compose
+      # only needs to read the project .env and reference the source tree.
+      - /root/good-360-bids:/root/good-360-bids:ro
       # Shared roster.db so missioncontrol can sync QuickBeed customers into
       # the nonprofits table that monitor/daemon's orchestrator reads from.
       - roster_data:/app/good360_roster/db

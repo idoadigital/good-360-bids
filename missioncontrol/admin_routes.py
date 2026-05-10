@@ -644,9 +644,23 @@ def _restart_compose_services() -> dict:
     # `up -d` (not `restart`) — `restart` reuses the existing container, which
     # was created with the OLD env_file. We need compose to recreate the
     # containers so the freshly-written .env is read at container creation.
-    cmd = ["docker", "compose", "-f", "/app/docker-compose.yml", "up", "-d", *services]
+    #
+    # --project-directory is the HOST path. Relative bind mounts in
+    # docker-compose.yml (e.g. ./settings_bootstrap.py) get resolved against
+    # the project directory, and the resulting paths are sent to the docker
+    # daemon — which resolves them on the host. Without this, paths resolve
+    # against /app inside this container and the daemon then fails to mount
+    # them ("not a directory"). The same host path is bind-mounted into this
+    # container (read-only) so the compose CLI can also read the project .env.
+    project_dir = os.environ.get("DASHBOARD_PROJECT_DIR", "/root/good-360-bids")
+    cmd = [
+        "docker", "compose",
+        "--project-directory", project_dir,
+        "-f", "/app/docker-compose.yml",
+        "up", "-d", *services,
+    ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd="/app")
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=project_dir)
         return {
             "ok": proc.returncode == 0,
             "rc": proc.returncode,
