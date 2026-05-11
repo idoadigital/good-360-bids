@@ -26,15 +26,28 @@ except ImportError:
     from playwright.sync_api import TimeoutError as PlaywrightTimeout
     from playwright.sync_api import sync_playwright
 
-# Load config
-with open('good360_checkout_config.json') as f:
-    config = json.load(f)
+# Load config. The JSON file is .gitignored — fresh deployments don't have it,
+# and modern deployments source creds from env (.env / dashboard settings store)
+# rather than this file. Treat the file as optional so a missing/empty config
+# doesn't break import.
+try:
+    with open('good360_checkout_config.json') as f:
+        config = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    config = {}
 
-# Constants
-LOGIN_URL = "https://marketplace.good360.org/login"
+# Sandbox-mode router (URL + creds + card swap when SANDBOX_MODE=true).
+# Sibling repo file; injected onto sys.path so the script keeps working when
+# invoked as a subprocess from monitor.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sandbox  # noqa: E402
+
+# Constants — live values; sandbox.* getters swap them at call time.
 MAX_AUTO_PAY = config.get('max_auto_pay', config.get('max_auto_pay_amount', 6400))
-USERNAME = config.get('username', '')
-PASSWORD = config.get('password', '')
+USERNAME, PASSWORD = sandbox.org_credentials(
+    config.get('username', ''),
+    config.get('password', ''),
+)
 CHROME_CARD_NAME = config.get('chrome_card_name', 'Kingdom')
 
 # Checkout answers
@@ -53,6 +66,7 @@ CHAT_ID = _os.environ.get('TELEGRAM_GROUP_HOPE4HUMANITY', '')
 
 def send_telegram(message):
     """Send alert via Telegram"""
+    message = sandbox.decorate_alert(message)
     delivered = False
     err = None
     try:
@@ -154,7 +168,7 @@ def autobuy_truck(truck_name, truck_url, screenshot_dir='checkout_screenshots'):
 
             # Step 1: Login
             print("[AUTO-BUY] Step 1: Logging in...")
-            page.goto(LOGIN_URL, wait_until='domcontentloaded')
+            page.goto(sandbox.good360_autobuy_login_url(), wait_until='domcontentloaded')
             time.sleep(1)  # Reduced wait
 
             # Click Login button to open modal
@@ -210,7 +224,7 @@ def autobuy_truck(truck_name, truck_url, screenshot_dir='checkout_screenshots'):
                 log_step(5, 'checkout_start', screenshot_dir, page)
             except:
                 # Try direct navigation
-                page.goto('https://marketplace.good360.org/cart', wait_until='domcontentloaded')
+                page.goto(sandbox.good360_cart_url(), wait_until='domcontentloaded')
                 time.sleep(2)
                 try:
                     page.click('a:has-text("Checkout"), button:has-text("Checkout")', timeout=10000)
@@ -290,10 +304,10 @@ def autobuy_truck(truck_name, truck_url, screenshot_dir='checkout_screenshots'):
                 page.click('button:has-text("Visa"), [data-card="visa"]', timeout=5000)
                 time.sleep(0.5)
 
-                # Fill card number, expiry, CVV
-                card_number = _os.environ.get('CARD_HOPE4HUMANITY_NUMBER', '')
-                card_expiry_raw = _os.environ.get('CARD_HOPE4HUMANITY_EXPIRY', '')  # MMYY
-                card_cvv = _os.environ.get('CARD_HOPE4HUMANITY_CVV', '')
+                # Fill card number, expiry, CVV. In sandbox mode this returns
+                # the SANDBOX_CARD_* values so no real PAN ever reaches the
+                # test browser; otherwise reads CARD_HOPE4HUMANITY_*.
+                card_number, card_expiry_raw, card_cvv, _, _ = sandbox.env_card_fields('CARD_HOPE4HUMANITY')
                 if not (card_number and card_expiry_raw and card_cvv):
                     raise RuntimeError('Card details missing from env — refusing to submit empty payment form')
                 card_expiry = f"{card_expiry_raw[:2]}/{card_expiry_raw[2:]}"  # MMYY -> MM/YY

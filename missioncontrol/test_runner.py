@@ -362,7 +362,10 @@ def _cart_cleanup_safe() -> None:
             page.set_default_timeout(20_000)
             try:
                 # Login first (cart pages 401 without auth).
-                page.goto("https://catalog.good360.org/marketplace/home", wait_until="networkidle", timeout=20_000)
+                import sandbox as _sandbox  # local import: this module is
+                # imported at module-load time but sandbox is not always on
+                # sys.path until the path-setup block above has run.
+                page.goto(_sandbox.good360_login_url(), wait_until="networkidle", timeout=20_000)
                 try:
                     page.click("text=Login", timeout=5_000)
                     page.wait_for_selector('input[placeholder*="email" i]', state="visible", timeout=8_000)
@@ -376,8 +379,8 @@ def _cart_cleanup_safe() -> None:
                 # Navigate to cart and remove items. Selectors mirror the
                 # ones used in good360_autobuy.py's cart navigation.
                 for cart_url in (
-                    "https://marketplace.good360.org/cart",
-                    "https://catalog.good360.org/marketplace/checkout/cart",
+                    _sandbox.good360_cart_url(),
+                    _sandbox.good360_checkout_url(),
                 ):
                     try:
                         page.goto(cart_url, wait_until="domcontentloaded", timeout=15_000)

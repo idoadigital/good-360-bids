@@ -26,18 +26,28 @@ _AUDIT_DIR = Path(os.environ.get("AUDIT_LOG_DIR", os.environ.get("WORKDIR", "/ap
 _HOST = socket.gethostname()
 
 
+def _sandbox_active() -> bool:
+    return (os.environ.get("SANDBOX_MODE", "") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _today_path() -> Path:
     _AUDIT_DIR.mkdir(parents=True, exist_ok=True)
     return _AUDIT_DIR / f"audit-{datetime.now(UTC).strftime('%Y-%m-%d')}.jsonl"
 
 
 def audit(event: str, **fields) -> None:
-    """Append one structured event. Never raises — audit must not break the caller."""
+    """Append one structured event. Never raises — audit must not break the caller.
+
+    Every entry is tagged with a `sandbox` boolean so a test-mode purchase
+    attempt can never be mistaken for a real one when the operator greps the
+    log. Caller-supplied `sandbox` (if any) is honored.
+    """
     entry = {
         "ts": datetime.now(UTC).isoformat(),
         "host": _HOST,
         "pid": os.getpid(),
         "event": event,
+        "sandbox": _sandbox_active(),
         **fields,
     }
     try:

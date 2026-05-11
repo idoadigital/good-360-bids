@@ -22,6 +22,18 @@ from datetime import datetime, timezone
 from typing import Optional
 
 
+def _sandbox_active() -> bool:
+    return (os.environ.get("SANDBOX_MODE", "") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _decorate(message: str) -> str:
+    if not _sandbox_active() or not message:
+        return message
+    if message.lstrip().startswith("[SANDBOX]"):
+        return message
+    return "[SANDBOX] " + message
+
+
 def _infer_level(message: str) -> str:
     msg = message or ""
     if "❌" in msg or "ERROR" in msg.upper() or "FAILED" in msg.upper() or "TIMEOUT" in msg.upper():
@@ -73,6 +85,8 @@ def record_telegram(
         get_conn = _get_conn()
         if get_conn is None:
             return
+        message = _decorate(message)
+        title = _decorate(title) if title else title
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with get_conn() as c:
             c.execute(

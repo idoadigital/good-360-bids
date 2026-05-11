@@ -1072,6 +1072,116 @@ dl.kv-grid dd.mono {
 .warn-banner .warn-text { color: var(--text-dim); }
 .warn-banner strong { color: var(--text); }
 
+/* Sandbox-mode top-of-page indicator. Sticky so it's visible regardless of
+   scroll/tab state. Bright magenta to be impossible to miss but not red
+   (red is reserved for system-down alerts). */
+/* Banner height is consumed by --banner-h so the sidebar (position:fixed) and
+   topbar (position:sticky top:0) shift down instead of being painted over.
+   Set on body[data-sandbox="on"] further down so the offset only applies when
+   the banner is actually visible. */
+:root { --banner-h: 0px; }
+
+.sandbox-banner {
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+    background: linear-gradient(90deg, #b91c5c, #ec4899);
+    color: #fff;
+    padding: 8px 16px;
+    font-size: 13px;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    letter-spacing: 0.02em;
+    box-sizing: border-box;
+    height: var(--banner-h);
+    overflow: hidden;
+}
+/* `display: flex` above outranks the user-agent `[hidden] { display: none }`
+   rule, so without this the banner renders even when sandbox is off. */
+.sandbox-banner[hidden] { display: none; }
+
+/* When sandbox is on, reserve banner height and shift the fixed sidebar +
+   sticky topbar down so they stop at banner-bottom, not viewport-top. */
+body[data-sandbox="on"] { --banner-h: 36px; }
+body[data-sandbox="on"] .sidebar { top: var(--banner-h); }
+body[data-sandbox="on"] .topbar  { top: var(--banner-h); }
+.sandbox-banner code {
+    background: rgba(0, 0, 0, 0.25);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+.sandbox-banner svg { flex-shrink: 0; }
+body[data-sandbox="on"] { /* hook for future global tweaks */ }
+
+/* Sandbox toggle panel inside the Settings tab. Echoes warn-banner sizing
+   but with the magenta accent to match the top banner. */
+.sandbox-panel {
+    background:
+        linear-gradient(90deg, rgba(236, 72, 153, 0.08), transparent),
+        var(--surface);
+    border: 1px solid rgba(236, 72, 153, 0.3);
+    border-left: 3px solid #ec4899;
+    border-radius: var(--radius-control);
+    padding: 16px 18px;
+    margin-bottom: var(--space-3);
+}
+.sandbox-panel__header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+}
+.sandbox-panel__title h2 {
+    margin: 0 0 4px;
+    font-size: 15px;
+    color: var(--text);
+}
+.sandbox-panel__lede {
+    margin: 0;
+    font-size: 12.5px;
+    color: var(--text-dim);
+    max-width: 70ch;
+}
+.sandbox-panel__hint {
+    margin-top: 12px;
+    font-size: 12px;
+    color: var(--text-mute);
+    font-family: var(--font-mono);
+}
+.sandbox-panel[data-state="on"] {
+    border-color: rgba(236, 72, 153, 0.6);
+    background:
+        linear-gradient(90deg, rgba(236, 72, 153, 0.15), transparent),
+        var(--surface);
+}
+.sandbox-panel[data-state="on"] .sandbox-panel__hint strong { color: #ec4899; }
+
+/* Confirm modal for the sandbox toggle. Reuses the .modal / .modal-card frame;
+   .sandbox-modal-* extensions just tune the body + confirm-button accent. */
+.sandbox-modal-card { max-width: 480px; }
+.sandbox-modal-body {
+    margin: 0 0 var(--space-3) 0;
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1.55;
+}
+.sandbox-modal-confirm {
+    background: linear-gradient(90deg, #b91c5c, #ec4899);
+    color: #fff;
+    border-color: transparent;
+}
+.sandbox-modal-confirm:hover { filter: brightness(1.08); }
+.sandbox-modal-confirm.live {
+    /* Going back to live mode — use the standard primary look so it doesn't
+       read as "more sandbox". */
+    background: var(--accent, #2f7dff);
+}
+
 .apply-output {
     background: var(--surface-2);
     border: 1px solid var(--border);

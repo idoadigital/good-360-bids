@@ -13,12 +13,15 @@ import pytz
 from playwright.sync_api import sync_playwright
 
 import config as _cfg
+import sandbox  # sandbox-mode URL routing
 
 WORKDIR = os.environ.get("WORKDIR", "/a0/usr/workdir")
 SCREENSHOT_DIR = f"{WORKDIR}/browser_screenshots"
 LOG_FILE = f"{WORKDIR}/good360_daemon.log"
 STATE_FILE = f"{WORKDIR}/good360_daemon_state.json"
-GOOD360_HOME = "https://catalog.good360.org/marketplace/browse-goods/truckload-donations/amazon.html"
+# GOOD360_HOME used to be a hardcoded constant; it now resolves at call time
+# via sandbox.good360_browse_url() so a sandbox toggle takes effect on the
+# next page load without a daemon restart.
 DAEMON_PORT = 5002
 
 logging.basicConfig(level=logging.INFO,
@@ -107,7 +110,7 @@ class BrowserManager:
         page = ctx['page']
         try:
             log.info(f"[{ctx['org_key']}] Logging in as {email}...")
-            page.goto(GOOD360_HOME, wait_until='domcontentloaded', timeout=20000)
+            page.goto(sandbox.good360_browse_url(), wait_until='domcontentloaded', timeout=20000)
             time.sleep(1)
             # Check if already logged in
             if page.locator('input[placeholder*="email" i]').count() == 0 and '$' in page.inner_text('body'):

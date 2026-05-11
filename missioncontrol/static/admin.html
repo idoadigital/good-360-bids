@@ -11,6 +11,17 @@
 </head>
 <body class="admin-body">
 
+<!-- Sandbox-mode indicator. Hidden by default; admin.js fetches /api/auth/state
+     and unhides this banner when sandbox_mode === true. Sticky so it stays
+     visible regardless of which tab the operator is on. -->
+<div id="sandboxBanner" class="sandbox-banner" hidden role="status" aria-live="polite">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+    </svg>
+    <strong>SANDBOX MODE</strong>
+    <span>scanning <code id="sandboxBannerUrl">sandbox-360.netlify.app</code> · no live Good360 traffic · turn off in Settings → Sandbox</span>
+</div>
+
 <div class="app-shell">
 
     <!-- ===================== SIDEBAR ===================== -->
@@ -649,6 +660,42 @@
                     <div>
                         <strong>Sensitive data warning.</strong>
                         <span class="warn-text">Values are AES-GCM encrypted in the dashboard's SQLite store with a key kept outside the database. A web admin panel is still a larger attack surface than a private secrets manager — for production, prefer Vault / AWS Secrets Manager / 1Password Connect.</span>
+                    </div>
+                </div>
+
+                <!-- Confirmation modal for the sandbox toggle. Replaces the
+                     native confirm() so the prompt matches the rest of the
+                     dashboard's UI and lets us style the destructive action. -->
+                <div class="modal" id="sandboxConfirmModal" hidden>
+                    <div class="modal-card sandbox-modal-card" role="dialog" aria-modal="true" aria-labelledby="sandboxConfirmTitle">
+                        <h3 id="sandboxConfirmTitle">Turn SANDBOX MODE on?</h3>
+                        <p id="sandboxConfirmBody" class="sandbox-modal-body"></p>
+                        <div class="modal-actions">
+                            <button type="button" data-close>Cancel</button>
+                            <button type="button" class="btn-primary sandbox-modal-confirm" id="sandboxConfirmOk">Turn on sandbox</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sandbox-mode panel. Standalone toggle so flipping it doesn't
+                     get lost in the long settings form. -->
+                <div class="sandbox-panel super-only" id="sandboxPanel" data-state="off">
+                    <div class="sandbox-panel__header">
+                        <div class="sandbox-panel__title">
+                            <h2>Sandbox mode</h2>
+                            <p class="sandbox-panel__lede">
+                                Route every scan + autobuy to the test site instead of the live Good360 marketplace.
+                                Turning this on stops live purchases — flip it off before a real ramp.
+                            </p>
+                        </div>
+                        <button class="autobuy-toggle off" type="button" id="sandboxToggle"
+                                role="switch" aria-checked="false"
+                                aria-label="Sandbox mode">
+                            <span class="autobuy-toggle__track"><span class="autobuy-toggle__thumb"></span></span>
+                        </button>
+                    </div>
+                    <div class="sandbox-panel__hint" id="sandboxPanelHint">
+                        Currently <strong>OFF</strong> — scans hit live Good360.
                     </div>
                 </div>
 

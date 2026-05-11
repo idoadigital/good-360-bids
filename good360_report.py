@@ -17,7 +17,11 @@ ALERT_TO = [e.strip() for e in os.environ.get("ALERT_EMAIL_TO", "").split(",") i
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_GROUP_HOPE4HUMANITY", "")
 LOG_FILE = f"{os.environ.get('WORKDIR', '/a0/usr/workdir')}/good360_run_log.json"
-GOOD360_URL = "https://catalog.good360.org/marketplace/browse-goods/truckload-donations/amazon.html"
+
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sandbox  # noqa: E402  (sandbox-mode URL routing)
+GOOD360_URL = sandbox.good360_browse_url()
 REPORT_HOURS = 6
 
 
@@ -162,7 +166,9 @@ def main():
     msg["From"] = SMTP_USER
     msg["To"] = ", ".join(ALERT_TO)
     msg.attach(MIMEText(html, "html"))
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+    # 587 + STARTTLS — port 465 (SMTPS) is blocked outbound on this host.
+    with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
+        server.starttls()
         server.login(SMTP_USER, SMTP_PASS)
         server.sendmail(SMTP_USER, ALERT_TO, msg.as_string())
     print(f"6-hour report email sent to: {ALERT_TO}")

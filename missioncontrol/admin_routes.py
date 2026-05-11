@@ -61,6 +61,10 @@ SECRET_SETTINGS = {
     "OPENAI_API_KEY",
     # QuickBeed customer-sync (the secret bits)
     "QUICKBEED_API_TOKEN", "QUICKBEED_WEBHOOK_SECRET",
+    # Sandbox-mode test creds + card. Treated as secrets so they share the same
+    # at-rest encryption + masking as live values, even though the data is fake.
+    "SANDBOX_GOOD360_PASSWORD",
+    "SANDBOX_CARD_NUMBER", "SANDBOX_CARD_EXPIRY", "SANDBOX_CARD_CVV",
 }
 PUBLIC_SETTINGS = {
     "CARD_REVIVING_HOMES_TYPE", "CARD_HOPE4HUMANITY_TYPE",
@@ -74,6 +78,10 @@ PUBLIC_SETTINGS = {
     # QuickBeed customer-sync (non-secret bits)
     "QUICKBEED_BASE_URL", "QUICKBEED_APP_ID", "QUICKBEED_CONSUMER_ID",
     "QUICKBEED_POLL_INTERVAL_SECONDS", "QUICKBEED_DRY_RUN",
+    # Sandbox mode — when true the scan/autobuy stack swaps to the test site.
+    "SANDBOX_MODE",
+    "SANDBOX_GOOD360_BASE_URL", "SANDBOX_GOOD360_EMAIL",
+    "SANDBOX_CARD_NAME", "SANDBOX_CARD_TYPE",
 }
 ALL_SETTINGS = SECRET_SETTINGS | PUBLIC_SETTINGS
 
@@ -115,7 +123,29 @@ def auth_state():
         "user": u,
         "registration_open": not has_any_user(),
         "user_count": count_users(),
+        "sandbox_mode": _sandbox_mode_active(),
     })
+
+
+def _sandbox_mode_active() -> bool:
+    """True if the sandbox toggle is on in the encrypted settings store.
+
+    Read from the DB rather than os.environ because the dashboard process is
+    long-lived; SANDBOX_MODE in our own env is whatever was set when the
+    container started, which lags behind toggles until the next Apply. The DB
+    value is the source of truth the operator just clicked.
+    """
+    try:
+        with get_conn() as c:
+            row = c.execute(
+                "SELECT value_enc FROM settings WHERE key = 'SANDBOX_MODE'"
+            ).fetchone()
+        if not row:
+            return False
+        v = secrets_store.decrypt(row["value_enc"]) or ""
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        return False
 
 
 @bp.route("/api/auth/register", methods=["POST"])

@@ -41,14 +41,24 @@ from pathlib import Path
 # ============================================================
 # CONFIGURATION
 # ============================================================
-GOOD360_URL = "https://catalog.good360.org/marketplace/browse-goods/truckload-donations/amazon.html"
-GOOD360_LOGIN_URL = "https://catalog.good360.org/marketplace/home"
+import sandbox  # sandbox-mode URL/credential routing
+
+# Live URL constants — sandbox mode swaps the host at call time via
+# sandbox.good360_browse_url() / good360_login_url(). Kept as references so
+# code that builds emails / log strings can show the live URL even while
+# scanning the sandbox.
+GOOD360_URL_LIVE = sandbox.LIVE_BROWSE_URL
+GOOD360_LOGIN_URL_LIVE = sandbox.LIVE_LOGIN_URL
+
 # Master scan credentials. Prefer SCAN_GOOD360_* (set by the dashboard),
 # fall back to the legacy per-org name for backwards compatibility.
-GOOD360_EMAIL = (os.environ.get("SCAN_GOOD360_EMAIL")
-                 or os.environ.get("GOOD360_HOPE4HUMANITY_EMAIL", ""))
-GOOD360_PASSWORD = (os.environ.get("SCAN_GOOD360_PASSWORD")
-                    or os.environ.get("GOOD360_HOPE4HUMANITY_PASSWORD", ""))
+_LIVE_GOOD360_EMAIL = (os.environ.get("SCAN_GOOD360_EMAIL")
+                       or os.environ.get("GOOD360_HOPE4HUMANITY_EMAIL", ""))
+_LIVE_GOOD360_PASSWORD = (os.environ.get("SCAN_GOOD360_PASSWORD")
+                          or os.environ.get("GOOD360_HOPE4HUMANITY_PASSWORD", ""))
+GOOD360_EMAIL, GOOD360_PASSWORD = sandbox.scan_credentials(
+    _LIVE_GOOD360_EMAIL, _LIVE_GOOD360_PASSWORD,
+)
 
 SMTP_USER = os.environ.get("ALERT_EMAIL_FROM", "")
 SMTP_PASS = os.environ.get("SMTP_PASSWORD", "")
@@ -196,6 +206,15 @@ def check_lock_and_cooldown():
     try:
         with open(CONFIG_PATH) as f:
             config = json.load(f)
+    except FileNotFoundError:
+        # Config file is .gitignored and not always present (modern deploys read
+        # creds + cooldown state from .env / dashboard settings). Treat absence
+        # as "no cooldown" rather than logging it on every scan.
+        return False, None, None
+    except Exception as e:
+        log_cron(f"  [COOLDOWN CHECK] Error: {e}")
+        return False, None, None
+    try:
         org = config.get("org_cooldown", {}).get("hope4humanity", {})
         if org.get("cooldown_active", False):
             next_allowed = org.get("next_allowed_date")
@@ -305,7 +324,7 @@ def write_heartbeat():
 def send_error_alert(error_message):
     """Send notification when script encounters errors"""
     timestamp = datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d %H:%M:%S")
-    subject = "Good360 Monitor ERROR Alert"
+    subject = sandbox.alert_prefix() + "Good360 Monitor ERROR Alert"
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -332,7 +351,7 @@ def send_error_alert(error_message):
     except Exception as e:
         log_cron(f"Failed to send error alert email: {e}")
 
-    tg_msg = f"Good360 Monitor ERROR\n\nTime: {timestamp}\nError: {error_message}\n\nPlease check the script!\n- E-Comsetter Good360 Monitor"
+    tg_msg = sandbox.alert_prefix() + f"Good360 Monitor ERROR\n\nTime: {timestamp}\nError: {error_message}\n\nPlease check the script!\n- E-Comsetter Good360 Monitor"
     delivered = False
     err = None
     try:
@@ -409,6 +428,7 @@ def is_autobuy_active():
 
 def send_telegram(message):
     """Send Telegram message to ALL org groups"""
+    message = sandbox.decorate_alert(message)
     url = "https://api.telegram.org/bot" + TELEGRAM_TOKEN + "/sendMessage"
     any_delivered = False
     last_err = None
@@ -439,7 +459,7 @@ def send_telegram(message):
 
 def send_alert_email(available_trucks, subject_prefix="ALERT", extra_note=""):
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject_prefix + ": Amazon Truckload NOW AVAILABLE on Good360!"
+    msg["Subject"] = sandbox.alert_prefix() + subject_prefix + ": Amazon Truckload NOW AVAILABLE on Good360!"
     msg["From"] = SMTP_USER
     msg["To"] = ", ".join(ALERT_TO)
     truck_rows = ""
@@ -463,7 +483,7 @@ def send_alert_email(available_trucks, subject_prefix="ALERT", extra_note=""):
 <th style='padding:8px;border:1px solid #ddd;'>Truck</th>
 <th style='padding:8px;border:1px solid #ddd;'>Status</th>
 </tr>""" + truck_rows + """</table><br>
-<p style='text-align:center;'><a href='https://catalog.good360.org/marketplace/browse-goods/truckload-donations/amazon.html'
+<p style='text-align:center;'><a href='""" + sandbox.good360_browse_url() + """'
 style='background:#27ae60;color:white;padding:12px 24px;text-decoration:none;border-radius:5px;font-size:16px;'>VIEW &amp; ORDER NOW</a></p>
 <br><p style='color:#888;font-size:12px;'>Detected at: """ + now_str + """ - E-Comsetter Good360 Monitor</p>
 </div></body></html>"""
@@ -500,6 +520,7 @@ def get_org_telegram_group(org_key):
 
 def send_telegram_to_org(org_key, message):
     """Send Telegram to specific org's group"""
+    message = sandbox.decorate_alert(message)
     chat_id = get_org_telegram_group(org_key)
     delivered = False
     err = None
@@ -526,7 +547,7 @@ def send_telegram_alert(available_trucks, extra_note=""):
     now = datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d %H:%M:%S")
     truck_list = "\n".join(["- " + t["name"] for t in available_trucks])
     extra = "\n" + extra_note if extra_note else ""
-    message = "ALERT: Amazon Truckload AVAILABLE!\n\n" + truck_list + extra + "\n\nOrder NOW: " + GOOD360_URL + "\n\nDetected: " + now + "\n- E-Comsetter Good360 Monitor"
+    message = sandbox.alert_prefix() + "ALERT: Amazon Truckload AVAILABLE!\n\n" + truck_list + extra + "\n\nOrder NOW: " + sandbox.good360_browse_url() + "\n\nDetected: " + now + "\n- E-Comsetter Good360 Monitor"
     send_telegram(message)
 
 def send_urgent_manual_alert(truck_name, admin_fee, truck_url):
@@ -890,7 +911,7 @@ def check_trucks():
         _login_ok = False
         _login_err = None
         try:
-            page.goto(GOOD360_LOGIN_URL, wait_until="networkidle", timeout=30000)
+            page.goto(sandbox.good360_login_url(), wait_until="networkidle", timeout=30000)
             page.click("text=Login", timeout=10000)
             page.wait_for_selector('input[placeholder*="email" i]', state="visible", timeout=15000)
             page.fill('input[placeholder*="email" i]', GOOD360_EMAIL)
@@ -916,7 +937,7 @@ def check_trucks():
             except Exception:
                 pass
 
-        page.goto(GOOD360_URL, wait_until="networkidle", timeout=30000)
+        page.goto(sandbox.good360_browse_url(), wait_until="networkidle", timeout=30000)
         time.sleep(2)
         truck_links = {}
         try:
@@ -926,7 +947,7 @@ def check_trucks():
                     text = anchor.inner_text().strip()
                     href = anchor.get_attribute("href") or ""
                     if "amazon" in text.lower() and "truckload" in text.lower() and href:
-                        full_url = href if href.startswith("http") else "https://catalog.good360.org" + href
+                        full_url = href if href.startswith("http") else sandbox.good360_base_url() + href
                         truck_links[text[:50]] = full_url
                 except:
                     continue
@@ -946,7 +967,7 @@ def check_trucks():
             name_lower = name.lower()
             should_track = any(kw in name_lower for kw in TRACK_KEYWORDS)
             excluded = any(kw in name_lower for kw in EXCLUDE_KEYWORDS)
-            truck_url = GOOD360_URL
+            truck_url = sandbox.good360_browse_url()
             for link_text, link_url in truck_links.items():
                 if link_text.lower()[:20] in name.lower() or name.lower()[:20] in link_text.lower():
                     truck_url = link_url
@@ -1040,7 +1061,7 @@ def main():
 
             for truck in newly_available:
                 truck_name = truck["name"]
-                truck_url = truck.get("url", GOOD360_URL)
+                truck_url = truck.get("url", sandbox.good360_browse_url())
 
                 # 1. ALERT-FIRST: Send availability alert BEFORE auto-buy.
                 # Email and Telegram are independent fallbacks — never let one

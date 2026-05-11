@@ -7,6 +7,10 @@ from datetime import datetime
 import pytz
 import requests
 
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sandbox  # noqa: E402  (sandbox-mode alert prefix)
+
 # Config
 # All state lives in the shared workdir volume so the watchdog (which has no
 # access to the monitor container's filesystem) can read what monitor writes.
@@ -26,6 +30,7 @@ def log_alert(msg):
         f.write(f"[{datetime.now(ET).strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
 
 def send_telegram_alert(message):
+    message = sandbox.decorate_alert(message)
     delivered = False
     err = None
     try:

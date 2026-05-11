@@ -66,11 +66,32 @@ $$('.tab').forEach(t => t.addEventListener('click', () => {
     const isSuper = state.user.role === 'super_admin';
     $$('.super-only').forEach(el => el.dataset.hidden = isSuper ? 'false' : 'true');
 
+    applySandboxBanner(state.sandbox_mode);
+
     loadScans();
     loadSidebarBadges();
     loadSystemStatus();
     setInterval(loadSystemStatus, 30_000);
+    // Cheap re-check so a toggle from another tab/operator updates the banner
+    // even on long-lived dashboard sessions.
+    setInterval(refreshSandboxBanner, 60_000);
 })();
+
+// ---------------- Sandbox banner ----------------
+
+function applySandboxBanner(active) {
+    const banner = $('#sandboxBanner');
+    if (!banner) return;
+    document.body.dataset.sandbox = active ? 'on' : 'off';
+    banner.hidden = !active;
+}
+
+async function refreshSandboxBanner() {
+    try {
+        const s = await fetch('/api/auth/state', {credentials: 'same-origin'}).then(r => r.json());
+        applySandboxBanner(!!s.sandbox_mode);
+    } catch { /* network blip — leave the banner as-is */ }
+}
 
 $('#logoutBtn').addEventListener('click', async () => {
     await api('/api/auth/logout', {method: 'POST'});
@@ -1277,6 +1298,18 @@ document.getElementById('bootstrapQbBtn')?.addEventListener('click', (ev) => {
 // ---------------- Settings ----------------
 
 const SETTING_GROUPS = [
+    // The SANDBOX_MODE flag itself is rendered as a dedicated toggle panel
+    // above the form; the rest of the sandbox config still goes in the form
+    // so the operator can edit URL / creds / card details inline.
+    {name: 'Sandbox · test site & credentials (used when SANDBOX_MODE is on)', span: 2, keys: [
+        'SANDBOX_GOOD360_BASE_URL',
+        'SANDBOX_GOOD360_EMAIL',
+        'SANDBOX_GOOD360_PASSWORD',
+    ]},
+    {name: 'Sandbox · test card', keys: [
+        'SANDBOX_CARD_NAME', 'SANDBOX_CARD_NUMBER',
+        'SANDBOX_CARD_EXPIRY', 'SANDBOX_CARD_CVV', 'SANDBOX_CARD_TYPE',
+    ]},
     {name: 'Master scan credentials', span: 2, keys: [
         'SCAN_GOOD360_EMAIL',
         'SCAN_GOOD360_PASSWORD',
@@ -1329,6 +1362,8 @@ async function loadSettings() {
     const root = $('#settingsForm');
     root.innerHTML = '';
     const isSuper = CURRENT_USER.role === 'super_admin';
+
+    paintSandboxToggle(data);
 
     for (const group of SETTING_GROUPS) {
         const div = document.createElement('div');
@@ -1386,7 +1421,31 @@ async function saveSettings() {
             return;
         }
         const n = (j.updated || []).length;
-        setStatus(`✓ Saved · ${n} key${n === 1 ? '' : 's'} updated · encrypted at rest`, 'ok');
+        // Save only persists to the encrypted store. The values still need to
+        // be flushed to .env and the affected containers recreated to pick up
+        // the new env at creation time. Chain the Apply call so the operator
+        // doesn't have to remember a second click.
+        setStatus(`Saved ${n} key${n === 1 ? '' : 's'} · applying…`, 'pending');
+        try {
+            const ar = await api('/api/admin/settings/apply', { method: 'POST' });
+            const aj = await ar.json();
+            if (!ar.ok || !aj.success) {
+                setStatus(
+                    `Saved · apply failed (HTTP ${ar.status}). Values are in the encrypted store but not yet pushed to running services.`,
+                    'err',
+                );
+            } else {
+                const wrote = (aj.wrote_keys || []).length;
+                const restartOk = aj.restart && aj.restart.ok;
+                const restartNote = restartOk
+                    ? 'services recreated'
+                    : `restart skipped: ${aj.restart?.reason || 'see audit log'}`;
+                setStatus(`✓ Saved & Applied · ${wrote} key${wrote === 1 ? '' : 's'} in .env · ${restartNote}`, 'ok');
+            }
+        } catch (e) {
+            console.error('[settings] apply failed', e);
+            setStatus(`Saved · apply error: ${e?.message || e}`, 'err');
+        }
         loadSettings();
         // Briefly highlight the save buttons.
         for (const id of ['saveSettingsBtn', 'saveSettingsBtnBottom']) {
@@ -1404,6 +1463,111 @@ async function saveSettings() {
 
 document.getElementById('saveSettingsBtn')?.addEventListener('click', saveSettings);
 document.getElementById('saveSettingsBtnBottom')?.addEventListener('click', saveSettings);
+
+// ---------------- Sandbox toggle ----------------
+//
+// SANDBOX_MODE is the only setting with a one-click action button instead of
+// a text input. We save+apply directly so flipping the switch takes effect on
+// the next service recreation without the operator hitting Save.
+
+function paintSandboxToggle(data) {
+    const meta = (data && data.SANDBOX_MODE) || {};
+    const v = (meta.value || '').toString().trim().toLowerCase();
+    const on = ['1', 'true', 'yes', 'on'].includes(v);
+    setSandboxToggleUI(on);
+}
+
+function setSandboxToggleUI(on) {
+    const btn = $('#sandboxToggle');
+    const panel = $('#sandboxPanel');
+    const hint = $('#sandboxPanelHint');
+    if (!btn || !panel) return;
+    btn.classList.toggle('on', on);
+    btn.classList.toggle('off', !on);
+    btn.setAttribute('aria-checked', on ? 'true' : 'false');
+    panel.dataset.state = on ? 'on' : 'off';
+    if (hint) {
+        hint.innerHTML = on
+            ? `Currently <strong>ON</strong> — scans hit the sandbox site, autobuy uses test card. Live Good360 is not touched.`
+            : `Currently <strong>OFF</strong> — scans hit live Good360.`;
+    }
+}
+
+function confirmSandboxToggle(turningOn) {
+    // Resolves true if the operator confirms, false on cancel / Esc / backdrop.
+    return new Promise((resolve) => {
+        const modal  = $('#sandboxConfirmModal');
+        const title  = $('#sandboxConfirmTitle');
+        const body   = $('#sandboxConfirmBody');
+        const okBtn  = $('#sandboxConfirmOk');
+        const cancel = modal.querySelector('[data-close]');
+        if (!modal || !title || !body || !okBtn || !cancel) {
+            // Modal markup missing — fall back so the toggle still works.
+            resolve(true);
+            return;
+        }
+
+        title.textContent = turningOn ? 'Turn SANDBOX MODE on?' : 'Turn SANDBOX MODE off?';
+        body.textContent = turningOn
+            ? 'All scans will route to the test site and autobuy will use the test card. Live Good360 will NOT be scanned or charged until you turn this off again.'
+            : 'Scans will resume against live Good360 and autobuy will use the real card on file. Make sure you intend to ramp back to live.';
+        okBtn.textContent = turningOn ? 'Turn on sandbox' : 'Resume live mode';
+        okBtn.classList.toggle('live', !turningOn);
+
+        const cleanup = () => {
+            modal.hidden = true;
+            okBtn.removeEventListener('click', onOk);
+            cancel.removeEventListener('click', onCancel);
+            modal.removeEventListener('click', onBackdrop);
+            document.removeEventListener('keydown', onKey);
+        };
+        const onOk      = () => { cleanup(); resolve(true);  };
+        const onCancel  = () => { cleanup(); resolve(false); };
+        const onBackdrop = (ev) => { if (ev.target === modal) onCancel(); };
+        const onKey      = (ev) => { if (ev.key === 'Escape') onCancel(); };
+
+        okBtn.addEventListener('click', onOk);
+        cancel.addEventListener('click', onCancel);
+        modal.addEventListener('click', onBackdrop);
+        document.addEventListener('keydown', onKey);
+
+        modal.hidden = false;
+        // Default focus on Cancel — safer for an accidental Enter press,
+        // matches the convention used by the destructive flows.
+        cancel.focus();
+    });
+}
+
+$('#sandboxToggle')?.addEventListener('click', async (ev) => {
+    const btn = ev.currentTarget;
+    if (btn.disabled) return;
+    const turningOn = !btn.classList.contains('on');
+
+    const ok = await confirmSandboxToggle(turningOn);
+    if (!ok) return;
+
+    btn.disabled = true;
+    try {
+        // Save the new value, then apply (write .env + recreate services).
+        const r = await api('/api/admin/settings', {
+            method: 'PUT',
+            body: JSON.stringify({SANDBOX_MODE: turningOn ? 'true' : 'false'}),
+        });
+        const j = await r.json();
+        if (!r.ok || !j.success) throw new Error(j.error || `HTTP ${r.status}`);
+
+        const ar = await api('/api/admin/settings/apply', {method: 'POST'});
+        const aj = await ar.json();
+        if (!ar.ok || !aj.success) throw new Error(aj.error || `apply HTTP ${ar.status}`);
+
+        setSandboxToggleUI(turningOn);
+        applySandboxBanner(turningOn);
+    } catch (e) {
+        alert('Could not update sandbox mode: ' + (e?.message || e));
+    } finally {
+        btn.disabled = false;
+    }
+});
 
 // ---------------- CSV import (dedicated page) ----------------
 

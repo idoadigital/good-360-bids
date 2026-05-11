@@ -17,9 +17,12 @@ services:
       - ./missioncontrol:/app/missioncontrol:ro
       - ./settings_bootstrap.py:/app/settings_bootstrap.py:ro
       - ./good360_monitor.py:/app/good360_monitor.py:ro
+      - ./good360_autobuy.py:/app/good360_autobuy.py:ro
       - ./good360_devtools_agent.py:/app/good360_devtools_agent.py:ro
       - ./good360_roster/good360_autobuy_v2.py:/app/good360_roster/good360_autobuy_v2.py:ro
       - ./notifications_log.py:/app/notifications_log.py:ro
+      - ./sandbox.py:/app/sandbox.py:ro
+      - ./audit_log.py:/app/audit_log.py:ro
     healthcheck:
       test: ["CMD", "python", "/app/healthcheck.py"]
       interval: 60s

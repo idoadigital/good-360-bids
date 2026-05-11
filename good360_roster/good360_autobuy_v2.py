@@ -60,6 +60,48 @@ def get_config(key: str, default: str = None) -> str:
         return row[0] if row else default
 
 
+# Sandbox-mode router — when SANDBOX_MODE=true, every OrgContext gets its
+# Good360 creds and payment_methods rewritten to point at the sandbox account
+# / test card. Imported here so the override applies whether the OrgContext
+# came from QuickBeed (live API) or roster.db (legacy).
+import sys as _sys
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in _sys.path:
+    _sys.path.insert(0, _REPO_ROOT)
+import sandbox  # noqa: E402
+
+
+def _apply_sandbox_overrides(ctx: "OrgContext") -> "OrgContext":
+    """Swap live creds + cards for sandbox values when SANDBOX_MODE is on.
+
+    Idempotent. In live mode, returns ctx unchanged.
+    """
+    if not sandbox.is_sandbox():
+        return ctx
+    sb_email, sb_password = sandbox.org_credentials(ctx.good360_email, ctx.good360_password)
+    sb_card = sandbox.card_for_org(None) or {}
+    try:
+        exp_month = int(sb_card.get("expiry", "1230")[:2])
+        exp_year = 2000 + int(sb_card.get("expiry", "1230")[2:])
+    except (ValueError, TypeError):
+        exp_month, exp_year = 12, 2030
+    ctx.good360_email = sb_email
+    ctx.good360_password = sb_password
+    ctx.payment_methods = [{
+        "id": None,
+        "priority": 1,
+        "card_holder_name": sb_card.get("name", "Sandbox Tester"),
+        "card_number": sb_card.get("number", ""),
+        "card_last4": (sb_card.get("number") or "")[-4:],
+        "card_expiry_month": exp_month,
+        "card_expiry_year": exp_year,
+        "card_cvv": sb_card.get("cvv", ""),
+        "billing_zip": "30046",
+        "card_type": sb_card.get("type", "visa"),
+    }]
+    return ctx
+
+
 # ─── Data Classes ─────────────────────────────────────────────────────────────
 @dataclass
 class OrgContext:
@@ -192,7 +234,7 @@ def _load_org_context_quickbeed(org_row, quickbeed_customer_id: str) -> OrgConte
             "is_primary": 1,
         })
 
-    return OrgContext(
+    return _apply_sandbox_overrides(OrgContext(
         org_id=org_row["id"],
         org_uuid=org_row["uuid"],
         org_name=cfg.get("name") or org_row["org_name"],
@@ -211,7 +253,7 @@ def _load_org_context_quickbeed(org_row, quickbeed_customer_id: str) -> OrgConte
         payment_methods=payment_methods,
         category_prefs={},
         checkout_answers=cfg.get("checkout_answers") or {},
-    )
+    ))
 
 
 def load_org_context(org_id: int) -> OrgContext:
@@ -284,7 +326,7 @@ def load_org_context(org_id: int) -> OrgContext:
                 "card_type": card["card_type"],
             })
 
-    return OrgContext(
+    return _apply_sandbox_overrides(OrgContext(
         org_id=org["id"],
         org_uuid=org["uuid"],
         org_name=org["org_name"],
@@ -303,7 +345,7 @@ def load_org_context(org_id: int) -> OrgContext:
         payment_methods=cards_decrypted,
         category_prefs={c["category_key"]: dict(c) for c in cats},
         checkout_answers={a["question_key"]: a["answer_text"] for a in answers},
-    )
+    ))
 
 
 # ─── Load Truck Context ──────────────────────────────────────────────────────

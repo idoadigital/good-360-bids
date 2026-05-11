@@ -118,6 +118,22 @@ def send_email(to_email: str, subject: str, body_html: str,
     if smtp_config is None:
         smtp_config = get_smtp_config()
 
+    # Sandbox-mode tag: prepend [SANDBOX] to subject + body so test emails
+    # can never be confused with real ones in the operator's inbox.
+    try:
+        import sys as _sys, os as _os
+        _root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        if _root not in _sys.path:
+            _sys.path.insert(0, _root)
+        import sandbox as _sandbox  # noqa: WPS433
+        if _sandbox.is_sandbox():
+            subject = _sandbox.decorate_alert(subject)
+            body_html = "<p style='background:#fee;color:#900;padding:6px 10px;font-family:monospace'>[SANDBOX] test mode — not a live alert</p>" + body_html
+            if body_text:
+                body_text = _sandbox.decorate_alert(body_text)
+    except Exception:
+        pass
+
     if not smtp_config["smtp_user"] or not smtp_config["smtp_password"]:
         logger.warning(f"SMTP not configured — skipping email to {to_email}")
         return False
