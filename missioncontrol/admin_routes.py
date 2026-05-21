@@ -20,6 +20,8 @@ import hashlib
 import hmac
 import io
 import threading
+import urllib.error
+import urllib.request
 
 from flask import Blueprint, Response, jsonify, redirect, request, send_from_directory
 
@@ -27,6 +29,11 @@ import auth
 from db import count_users, get_conn, has_any_user
 import quickbeed
 import secrets_store
+
+# Live View proxies HTTP calls to the persistent-browser daemon. Compose's
+# embedded DNS resolves `daemon` to that container's IP on the bridge
+# network; port 5002 matches good360_daemon.py's DAEMON_PORT.
+DAEMON_BASE_URL = os.environ.get("DAEMON_URL", "http://daemon:5002")
 
 bp = Blueprint("admin", __name__)
 
@@ -59,6 +66,10 @@ SECRET_SETTINGS = {
     "MISSIONCONTROL_API_KEY",
     # OpenAI / DevTools
     "OPENAI_API_KEY",
+    # OpenRouter — gateway used for the AI failure-diagnosis feature.
+    # Claude Haiku is reached through OpenRouter so the operator can
+    # swap models / providers without re-deploying the dashboard.
+    "OPENROUTER_API_KEY",
     # QuickBeed customer-sync (the secret bits)
     "QUICKBEED_API_TOKEN", "QUICKBEED_WEBHOOK_SECRET",
     # Sandbox-mode test creds + card. Treated as secrets so they share the same
@@ -71,6 +82,10 @@ PUBLIC_SETTINGS = {
     "TELEGRAM_GROUP_REVIVING_HOMES", "TELEGRAM_GROUP_HOPE4HUMANITY", "TELEGRAM_OPERATOR_CHAT_ID",
     "SMTP_HOST", "SMTP_PORT", "SMTP_USER", "ALERT_EMAIL_FROM", "ALERT_EMAIL_TO",
     "TZ", "LOG_LEVEL", "WORKDIR",
+    # Scan loop cadence (seconds between scan cycles). Surfaced as a slider
+    # in the dashboard so the operator can dial detection latency vs
+    # request-volume to Good360.
+    "MONITOR_INTERVAL_SECONDS",
     "AUTOBUY_ENGINE", "DEVTOOLS_AGENT_MODEL", "DEVTOOLS_AGENT_DRY_RUN",
     "DEVTOOLS_AGENT_TIMEOUT_SECONDS", "DEVTOOLS_AGENT_ISOLATED",
     "DEVTOOLS_AGENT_FALLBACK_ON_FAILED", "DEVTOOLS_CHROME_EXECUTABLE",
@@ -82,6 +97,10 @@ PUBLIC_SETTINGS = {
     "SANDBOX_MODE",
     "SANDBOX_GOOD360_BASE_URL", "SANDBOX_GOOD360_EMAIL",
     "SANDBOX_CARD_NAME", "SANDBOX_CARD_TYPE",
+    # OpenRouter model id used by the failure-diagnosis feature. Operator
+    # can switch (e.g. to anthropic/claude-sonnet-4.6 for richer output,
+    # or anthropic/claude-3.5-haiku for cost) without code changes.
+    "OPENROUTER_MODEL",
 }
 ALL_SETTINGS = SECRET_SETTINGS | PUBLIC_SETTINGS
 
@@ -703,41 +722,657 @@ def _restart_compose_services() -> dict:
         return {"ok": False, "reason": str(exc)}
 
 
+@bp.route("/api/admin/restart", methods=["POST"])
+@auth.super_admin_required
+def restart_stack():
+    """Full-stack restart triggered from the dashboard's status pill.
+
+    Sibling services (monitor/daemon/watchdog/telegram-bot/intake) are cycled
+    synchronously via `docker compose up -d` so config changes (e.g. init:true)
+    propagate. Missioncontrol then restarts itself via a detached `docker
+    restart $HOSTNAME` after a short delay — the sleep lets this HTTP
+    response flush before the container dies. `docker restart` is a single
+    daemon API call, so once issued it completes regardless of the caller.
+    """
+    if not Path("/var/run/docker.sock").exists() or not shutil.which("docker"):
+        return jsonify({"ok": False, "reason": "docker socket / cli not available"}), 503
+
+    siblings = _restart_compose_services()
+
+    self_container = os.environ.get("HOSTNAME", "")
+    if self_container:
+        subprocess.Popen(
+            ["sh", "-c", f"sleep 3 && docker restart {self_container}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    auth.audit("restart_stack", target=self_container or "missioncontrol",
+               detail=f"siblings_ok={siblings.get('ok')}")
+    return jsonify({
+        "ok": True,
+        "siblings": siblings,
+        "self_restart_in_seconds": 3,
+    })
+
+
+# ============================================================
+# Live View — operator-driven remote browser
+# ============================================================
+# Thin proxy in front of good360_daemon.py's /live/* endpoints, plus a
+# customer (org) list so the dashboard can render a pick-list. Auth-gated
+# at super_admin level since these can drive a real (live) checkout.
+
+def _daemon_request(method: str, path: str, payload: dict | None = None, timeout: int = 60):
+    """Tiny urllib wrapper. Returns (status_code, body_bytes, headers_dict).
+    Network errors collapse into a 502-shaped tuple so the caller doesn't
+    have to branch on exception types."""
+    url = DAEMON_BASE_URL.rstrip("/") + path
+    data = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        data = json.dumps(payload).encode()
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read(), dict(resp.getheaders())
+    except urllib.error.HTTPError as e:
+        return e.code, e.read() if hasattr(e, "read") else b"", dict(e.headers or {})
+    except urllib.error.URLError as e:
+        return 502, json.dumps({"status": "error", "message": f"daemon unreachable: {e.reason}"}).encode(), {}
+    except Exception as e:
+        return 502, json.dumps({"status": "error", "message": str(e)}).encode(), {}
+
+
+def _live_view_is_sandbox() -> bool:
+    """Match sandbox.is_sandbox() without importing it (avoids the /app
+    path-juggling needed for `config`)."""
+    return (os.environ.get("SANDBOX_MODE", "") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _live_master_card_number() -> str:
+    """The operator's card on file for live checkouts. The legacy schema
+    keeps card data in env vars rather than per-customer rows in QuickBeed,
+    so every live customer pastes the same numbers — that's expected.
+    Falls back gracefully if the Reviving Homes slot isn't configured."""
+    for prefix in ("CARD_REVIVING_HOMES", "CARD_HOPE4HUMANITY"):
+        n = (os.environ.get(f"{prefix}_NUMBER") or "").strip()
+        if n:
+            return prefix
+    return "CARD_REVIVING_HOMES"
+
+
+@bp.route("/api/admin/live/customers", methods=["GET"])
+@auth.login_required
+def live_customers():
+    """List customers for the Live View picker.
+
+    In **live mode** these are the real QuickBeed-synced nonprofits from
+    the `customers` table (status=active). In **sandbox mode** we fall
+    back to the two-org legacy config (load_orgs) so test runs stay self-
+    contained and don't expose real customer data.
+    """
+    out = []
+    if _live_view_is_sandbox():
+        try:
+            import sys as _sys
+            if "/app" not in _sys.path:
+                _sys.path.insert(0, "/app")
+            import config as _cfg
+            orgs = _cfg.load_orgs()
+        except Exception as e:
+            return jsonify({"success": False, "error": f"orgs load failed: {e}"}), 500
+        for key, org in orgs.items():
+            card = org.get("card") or {}
+            card_number = card.get("number") or ""
+            out.append({
+                "key":            key,
+                "name":           org.get("name") or key,
+                "good360_email":  org.get("good360_email") or "",
+                "card_last4":     card_number[-4:] if len(card_number) >= 4 else "",
+                "card_brand":     card.get("type") or "",
+                "max_auto_pay":   org.get("max_auto_pay") or org.get("max_price"),
+                "auto_buy":       bool(org.get("auto_buy")),
+                "paused":         bool(org.get("paused")),
+                "source":         "sandbox-orgs",
+            })
+    else:
+        # Live mode — real QuickBeed customers.
+        prefix = _live_master_card_number()
+        master_number = (os.environ.get(f"{prefix}_NUMBER") or "").strip()
+        master_last4 = master_number[-4:] if len(master_number) >= 4 else ""
+        master_brand = (os.environ.get(f"{prefix}_TYPE") or "").strip()
+        with get_conn() as c:
+            rows = c.execute(
+                "SELECT id, organization_name, email, status, max_budget "
+                "FROM customers WHERE status='active' "
+                "ORDER BY organization_name COLLATE NOCASE"
+            ).fetchall()
+        for r in rows:
+            out.append({
+                "key":            r["id"],                  # QuickBeed UUID
+                "name":           r["organization_name"] or "(unnamed)",
+                "good360_email":  r["email"] or "",
+                "card_last4":     master_last4,             # global card on file
+                "card_brand":     master_brand,
+                "max_auto_pay":   r["max_budget"],
+                "auto_buy":       True,
+                "paused":         False,
+                "source":         "quickbeed",
+            })
+
+    out.sort(key=lambda o: o["name"].lower())
+    return jsonify({"data": out, "count": len(out), "mode": "sandbox" if _live_view_is_sandbox() else "live"})
+
+
+@bp.route("/api/admin/live/customer/<path:key>", methods=["GET"])
+@auth.login_required
+def live_customer_detail(key):
+    """Full detail for one customer, shaped for the Live View copy-buttons.
+
+    Live mode: pull the row from the QuickBeed `customers` table and graft
+    on the operator's global card + scan creds. Sandbox mode: fall through
+    to the legacy org dict from good360_orgs_master.example.json.
+    """
+    if _live_view_is_sandbox():
+        try:
+            import sys as _sys
+            if "/app" not in _sys.path:
+                _sys.path.insert(0, "/app")
+            import config as _cfg
+            orgs = _cfg.load_orgs()
+        except Exception as e:
+            return jsonify({"success": False, "error": f"orgs load failed: {e}"}), 500
+        org = orgs.get(key)
+        if not org:
+            return jsonify({"success": False, "error": "not found"}), 404
+        return jsonify({"data": org})
+
+    # Live mode — real customer
+    with get_conn() as c:
+        row = c.execute("SELECT * FROM customers WHERE id = ?", (key,)).fetchone()
+    if not row:
+        return jsonify({"success": False, "error": "not found"}), 404
+    d = dict(row)
+
+    # Card data lives globally in env (legacy schema). Surface whichever
+    # CARD_<ORG>_* slot is populated so the operator can paste through it.
+    prefix = _live_master_card_number()
+    master_card = {
+        "name":   os.environ.get(f"{prefix}_NAME", ""),
+        "number": os.environ.get(f"{prefix}_NUMBER", ""),
+        "expiry": os.environ.get(f"{prefix}_EXPIRY", ""),
+        "cvv":    os.environ.get(f"{prefix}_CVV", ""),
+        "type":   os.environ.get(f"{prefix}_TYPE", ""),
+    }
+
+    # Good360 login is the operator's master scan account (one account
+    # purchases on behalf of every nonprofit).
+    good360_email    = os.environ.get("SCAN_GOOD360_EMAIL", "")
+    good360_password = os.environ.get("SCAN_GOOD360_PASSWORD", "")
+
+    return jsonify({"data": {
+        "name":                d.get("organization_name") or key,
+        "good360_email":       good360_email,
+        "good360_password":    good360_password,
+        "card":                master_card,
+        # The customers table has one warehouse address — reuse it for
+        # both shipping + billing display until a per-customer billing
+        # field is added.
+        "billing_address_line1": d.get("warehouse_address") or "",
+        # Checkout questions map to the QuickBeed fields:
+        "checkout_answers": {
+            "people_helped":        str(d.get("people_served") or ""),
+            "distribution_method":  d.get("distribution_method") or "",
+        },
+        # Extras the operator may want at hand:
+        "contact_email":  d.get("email") or "",
+        "contact_phone":  d.get("phone") or "",
+        "max_budget":     d.get("max_budget"),
+        "preferred_location": d.get("preferred_location") or "",
+        "truck_selection":    d.get("truck_selection") or "",
+    }})
+
+
+@bp.route("/api/admin/live/screenshot", methods=["GET"])
+@auth.login_required
+def live_screenshot():
+    """Stream the daemon's current Live View viewport as PNG.
+
+    Pass a `_ts` cache-buster query — the frontend uses it to defeat
+    browser caching during polling. We just forward to the daemon.
+    """
+    code, body, _hdrs = _daemon_request("GET", "/live/screenshot")
+    if code != 200:
+        # Daemon returns JSON on errors; pass that through.
+        return Response(body, status=code, mimetype="application/json")
+    return Response(body, mimetype="image/png", headers={"Cache-Control": "no-store"})
+
+
+@bp.route("/api/admin/live/navigate", methods=["POST"])
+@auth.super_admin_required
+def live_navigate():
+    payload = request.get_json(silent=True) or {}
+    code, body, _hdrs = _daemon_request("POST", "/live/navigate", payload)
+    auth.audit("live_navigate", target=payload.get("url"), detail=f"http={code}")
+    return Response(body, status=code, mimetype="application/json")
+
+
+@bp.route("/api/admin/live/prepare_checkout", methods=["POST"])
+@auth.super_admin_required
+def live_prepare_checkout():
+    payload = request.get_json(silent=True) or {}
+    # Longer timeout: prepare includes login + cart + checkout fill.
+    code, body, _hdrs = _daemon_request("POST", "/live/prepare_checkout", payload, timeout=180)
+    auth.audit(
+        "live_prepare_checkout",
+        target=f"{payload.get('org_key')} -> {payload.get('truck_url')}",
+        detail=f"http={code}",
+    )
+    return Response(body, status=code, mimetype="application/json")
+
+
+@bp.route("/api/admin/live/place_order", methods=["POST"])
+@auth.super_admin_required
+def live_place_order():
+    code, body, _hdrs = _daemon_request("POST", "/live/place_order", timeout=60)
+    auth.audit("live_place_order", target="-", detail=f"http={code}")
+    return Response(body, status=code, mimetype="application/json")
+
+
+# ============================================================
+# Checkout screenshots (gallery + lightbox)
+# ============================================================
+
+# Folders we're willing to expose. Each must be a direct child of WORKDIR;
+# the listing + serve endpoints both reject anything that resolves outside.
+SCREENSHOT_DIRS = ("browser_screenshots", "checkout_screenshots", "test_run_screenshots")
+
+
+def _screenshot_roots() -> list[tuple[str, Path]]:
+    workdir = Path(WORKDIR).resolve()
+    return [(name, (workdir / name).resolve()) for name in SCREENSHOT_DIRS]
+
+
+@bp.route("/api/admin/screenshots", methods=["GET"])
+@auth.login_required
+def list_screenshots():
+    """Inventory of all PNGs under the allowed screenshot dirs, newest first.
+
+    Each entry's `path` is the workdir-relative path the file endpoint expects,
+    so the UI doesn't have to reassemble it.
+    """
+    items: list[dict] = []
+    workdir = Path(WORKDIR).resolve()
+    for source, root in _screenshot_roots():
+        if not root.exists():
+            continue
+        for p in root.rglob("*.png"):
+            try:
+                rel = p.resolve().relative_to(workdir).as_posix()
+                stat = p.stat()
+            except (OSError, ValueError):
+                continue
+            items.append({
+                "source": source,
+                "name": p.name,
+                "path": rel,
+                "size": stat.st_size,
+                "mtime": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
+            })
+    items.sort(key=lambda it: it["mtime"], reverse=True)
+    return jsonify({"data": items, "count": len(items)})
+
+
+@bp.route("/api/admin/screenshots/file", methods=["GET"])
+@auth.login_required
+def get_screenshot_file():
+    """Serve a single screenshot. The `p` query arg is a workdir-relative path
+    that must resolve under one of SCREENSHOT_DIRS — anything else (absolute
+    paths, `..` escape attempts) gets 400."""
+    rel = request.args.get("p", "").strip()
+    if not rel:
+        return jsonify({"success": False, "error": "missing p"}), 400
+
+    workdir = Path(WORKDIR).resolve()
+    try:
+        requested = (workdir / rel).resolve()
+    except (OSError, ValueError):
+        return jsonify({"success": False, "error": "invalid path"}), 400
+
+    if not any(
+        _is_within(requested, root)
+        for _name, root in _screenshot_roots()
+    ):
+        return jsonify({"success": False, "error": "invalid path"}), 400
+    if not requested.exists() or not requested.is_file():
+        return jsonify({"success": False, "error": "file missing"}), 404
+
+    return Response(
+        requested.read_bytes(),
+        mimetype="image/png",
+        headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+# Screenshots are bucketed by the scan that triggered them. Scans run every
+# ~60s; a checkout typically completes inside the same minute but a slow
+# Playwright flow can spill past it — extend the window by a small grace so
+# we don't lose late-arriving frames to the next scan's bucket.
+_BUCKET_GRACE_SECONDS = 30
+_ET_TZ = timezone(timedelta(hours=-4))  # EDT; ET-naive scan strings are wall time
+
+# Capture JSON files live next to screenshots — same naming convention,
+# same bucketing strategy.
+CAPTURE_DIR = Path(WORKDIR) / "checkout_captures"
+
+
+@bp.route("/api/admin/scans/captures", methods=["GET"])
+@auth.login_required
+def list_captures():
+    """Metadata for every checkout capture JSON, newest first.
+
+    Each entry summarizes outcome + truck + start time, deferring the full
+    network/console/HTML payload to /api/admin/scans/captures/file. The
+    list is cheap to render; the bodies are large.
+    """
+    items: list[dict] = []
+    if CAPTURE_DIR.exists():
+        for p in CAPTURE_DIR.glob("*.json"):
+            try:
+                stat = p.stat()
+            except OSError:
+                continue
+            # Peek at outcome / truck without loading the entire body.
+            outcome = ""
+            truck = ""
+            engine = ""
+            try:
+                with open(p) as f:
+                    head = f.read(2048)
+                # JSON keys are at the top; cheap string search is enough.
+                import re as _re
+                m = _re.search(r'"outcome"\s*:\s*"([^"]+)"', head)
+                outcome = m.group(1) if m else ""
+                m = _re.search(r'"truck_name"\s*:\s*"([^"]+)"', head)
+                truck = m.group(1) if m else ""
+                m = _re.search(r'"engine"\s*:\s*"([^"]+)"', head)
+                engine = m.group(1) if m else "script"
+            except Exception:
+                pass
+            items.append({
+                "name":    p.name,
+                "path":    f"checkout_captures/{p.name}",
+                "size":    stat.st_size,
+                "mtime":   datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
+                "outcome": outcome,
+                "truck":   truck,
+                "engine":  engine,
+            })
+    items.sort(key=lambda it: it["mtime"], reverse=True)
+    return jsonify({"data": items, "count": len(items)})
+
+
+@bp.route("/api/admin/scans/captures/file", methods=["GET"])
+@auth.login_required
+def get_capture_file():
+    """Stream a single capture JSON. Same path-traversal guard as the
+    screenshot endpoint — the resolved path must sit inside CAPTURE_DIR."""
+    rel = (request.args.get("p") or "").strip()
+    if not rel:
+        return jsonify({"success": False, "error": "missing p"}), 400
+    workdir = Path(WORKDIR).resolve()
+    try:
+        requested = (workdir / rel).resolve()
+    except (OSError, ValueError):
+        return jsonify({"success": False, "error": "invalid path"}), 400
+    if not _is_within(requested, CAPTURE_DIR.resolve()):
+        return jsonify({"success": False, "error": "invalid path"}), 400
+    if not requested.exists() or not requested.is_file():
+        return jsonify({"success": False, "error": "file missing"}), 404
+    return Response(
+        requested.read_bytes(),
+        mimetype="application/json",
+        headers={"Cache-Control": "private, max-age=60"},
+    )
+
+
+@bp.route("/api/admin/scans/captures/by-scan", methods=["GET"])
+@auth.login_required
+def captures_by_scan():
+    """Bucket capture JSONs by the scan that triggered them — mirrors the
+    screenshot by-scan endpoint so the UI can show both alongside each scan
+    row in one consistent way."""
+    limit = int(request.args.get("limit", "200"))
+    scan_ts_strs: list[str] = []
+    try:
+        with get_conn() as c:
+            for r in c.execute(
+                "SELECT ts FROM scans ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall():
+                scan_ts_strs.append(r["ts"])
+    except Exception:
+        scan_ts_strs = []
+    scan_ts_strs.reverse()
+    parsed = [(s, _parse_scan_ts(s)) for s in scan_ts_strs]
+    parsed = [(k, d) for k, d in parsed if d is not None]
+    keys  = [k for k, _ in parsed]
+    edges = [d for _, d in parsed]
+
+    buckets: dict[str, list[dict]] = {k: [] for k in keys}
+    orphan: list[dict] = []
+    import re as _re_local
+    if CAPTURE_DIR.exists():
+        for p in CAPTURE_DIR.glob("*.json"):
+            try:
+                stat = p.stat()
+            except OSError:
+                continue
+            mtime = datetime.fromtimestamp(stat.st_mtime, UTC)
+            # Peek for outcome + engine so the UI can color the entry.
+            outcome = ""
+            engine = "script"
+            try:
+                with open(p) as fh:
+                    head = fh.read(2048)
+                m = _re_local.search(r'"outcome"\s*:\s*"([^"]+)"', head)
+                outcome = m.group(1) if m else ""
+                m = _re_local.search(r'"engine"\s*:\s*"([^"]+)"', head)
+                engine = m.group(1) if m else "script"
+            except Exception:
+                pass
+            entry = {
+                "name":    p.name,
+                "path":    f"checkout_captures/{p.name}",
+                "size":    stat.st_size,
+                "mtime":   mtime.isoformat(),
+                "outcome": outcome,
+                "engine":  engine,
+            }
+            assigned = False
+            for i in range(len(edges) - 1, -1, -1):
+                start = edges[i]
+                end_grace = (
+                    edges[i + 1] + timedelta(seconds=_BUCKET_GRACE_SECONDS)
+                    if i + 1 < len(edges)
+                    else mtime + timedelta(seconds=1)
+                )
+                if start <= mtime < end_grace:
+                    buckets[keys[i]].append(entry)
+                    assigned = True
+                    break
+            if not assigned:
+                orphan.append(entry)
+    for v in buckets.values():
+        v.sort(key=lambda e: e["mtime"], reverse=True)
+    orphan.sort(key=lambda e: e["mtime"], reverse=True)
+    total = sum(len(v) for v in buckets.values()) + len(orphan)
+    return jsonify({"buckets": buckets, "orphan": orphan, "count": total})
+
+def _parse_scan_ts(ts: str) -> datetime | None:
+    """Scans table stores `%Y-%m-%d %H:%M:%S` naive ET strings (good360_monitor
+    uses pytz.timezone('America/New_York') then strftime — see now_et_str).
+    Anchor to EDT here; off by 1h during the winter switch but the bucketing
+    grace covers that window comfortably."""
+    if not ts:
+        return None
+    try:
+        return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_ET_TZ)
+    except ValueError:
+        return None
+
+
+@bp.route("/api/admin/screenshots/by-scan", methods=["GET"])
+@auth.login_required
+def screenshots_by_scan():
+    """Group screenshots by which scan triggered them.
+
+    A screenshot whose mtime falls in [scan.ts, next_scan.ts + grace] belongs
+    to that scan's bucket. Files older than the oldest scan or newer than the
+    newest scan + grace go into 'orphan'. Returns the bucket keyed by the same
+    scan ts string the frontend uses as its row key.
+    """
+    limit = int(request.args.get("limit", "200"))
+
+    # Pull the scan timestamps once, oldest → newest.
+    scan_ts_strs: list[str] = []
+    try:
+        with get_conn() as c:
+            for r in c.execute(
+                "SELECT ts FROM scans ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall():
+                scan_ts_strs.append(r["ts"])
+    except Exception:
+        scan_ts_strs = []
+    scan_ts_strs.reverse()
+    parsed: list[tuple[str, datetime]] = []
+    for s in scan_ts_strs:
+        dt = _parse_scan_ts(s)
+        if dt is not None:
+            parsed.append((s, dt))
+
+    # Pre-compute the window edges so each shot is one binary scan.
+    edges = [dt for _key, dt in parsed]
+    keys = [k for k, _dt in parsed]
+
+    buckets: dict[str, list[dict]] = {k: [] for k in keys}
+    orphan: list[dict] = []
+    workdir = Path(WORKDIR).resolve()
+
+    # Test-run screenshots are a separate workflow (Test buy panel has its own
+    # per-run viewer), so excluding them from scan buckets avoids assigning a
+    # test-buy click to whichever scan happened to be in flight at the time.
+    autobuy_sources = {"browser_screenshots", "checkout_screenshots"}
+
+    for source, root in _screenshot_roots():
+        if source not in autobuy_sources:
+            continue
+        if not root.exists():
+            continue
+        for p in root.rglob("*.png"):
+            try:
+                rel = p.resolve().relative_to(workdir).as_posix()
+                stat = p.stat()
+            except (OSError, ValueError):
+                continue
+            mtime = datetime.fromtimestamp(stat.st_mtime, UTC)
+            entry = {
+                "source": source,
+                "name":   p.name,
+                "path":   rel,
+                "size":   stat.st_size,
+                "mtime":  mtime.isoformat(),
+            }
+            # Latest scan whose ts ≤ mtime. Linear scan from the back since
+            # scan count is small and we expect mtimes to land near the end.
+            assigned = False
+            for i in range(len(edges) - 1, -1, -1):
+                start = edges[i]
+                end_grace = (
+                    edges[i + 1] + timedelta(seconds=_BUCKET_GRACE_SECONDS)
+                    if i + 1 < len(edges)
+                    else mtime + timedelta(seconds=1)  # newest scan: no upper bound
+                )
+                if start <= mtime < end_grace:
+                    buckets[keys[i]].append(entry)
+                    assigned = True
+                    break
+            if not assigned:
+                orphan.append(entry)
+
+    # Sort each bucket newest-first for natural lightbox order.
+    for v in buckets.values():
+        v.sort(key=lambda e: e["mtime"], reverse=True)
+    orphan.sort(key=lambda e: e["mtime"], reverse=True)
+
+    total = sum(len(v) for v in buckets.values()) + len(orphan)
+    return jsonify({"buckets": buckets, "orphan": orphan, "count": total})
+
+
 # ============================================================
 # Scans, purchases, audit (read-only views)
 # ============================================================
 
-def _read_scans(limit: int) -> list[dict]:
+def _read_scans(limit: int, include_trucks: bool = True) -> list[dict]:
     """Return the most recent scans, preferring the SQL `scans` table.
     Falls back to good360_run_log.json if SQL is empty (e.g., immediately
-    after migration before the monitor's next scan writes a row)."""
+    after migration before the monitor's next scan writes a row).
+
+    `include_trucks=False` skips the heavy trucks_json blob (the main scans
+    tab only needs truck_count/available_count + the precomputed `title`).
+    """
     rows: list[dict] = []
     try:
         with get_conn() as c:
-            sql_rows = c.execute(
-                "SELECT ts, alert_sent, action, truck_count, available_count, "
-                "trucks_json FROM scans ORDER BY id DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            if include_trucks:
+                sql_rows = c.execute(
+                    "SELECT ts, alert_sent, action, truck_count, available_count, "
+                    "trucks_json FROM scans ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            else:
+                # Heavy: trucks_json blobs add up to 200KB+ on a 200-row pull
+                # while the list view never reads them. The only thing the JS
+                # needs out of the blob is the lead truck's name — derive it
+                # from a lightweight SUBSTR scan below if at all needed.
+                sql_rows = c.execute(
+                    "SELECT ts, alert_sent, action, truck_count, available_count "
+                    "FROM scans ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
         for r in sql_rows:
-            try:
-                trucks = json.loads(r["trucks_json"] or "[]")
-            except (json.JSONDecodeError, TypeError):
-                trucks = []
-            rows.append({
+            entry = {
                 "time":            r["ts"],
                 "alert_sent":      bool(r["alert_sent"]),
                 "action":          r["action"] or "",
                 "truck_count":     r["truck_count"],
                 "available_count": r["available_count"],
-                "trucks":          trucks,
-                # legacy aliases for the existing JS:
-                "title":  trucks[0]["name"] if trucks else None,
-                "status": "scanned",
-            })
+                "status":          "scanned",
+            }
+            if include_trucks:
+                try:
+                    trucks = json.loads(r["trucks_json"] or "[]")
+                except (json.JSONDecodeError, TypeError):
+                    trucks = []
+                entry["trucks"] = trucks
+                entry["title"]  = trucks[0]["name"] if trucks else None
+            else:
+                entry["title"] = None
+            rows.append(entry)
     except Exception:
         rows = []
     if rows:
+        _stitch_login_to_scans(rows)
         return rows
     # JSON fallback — old single-file format.
     rl = _safe_json(RUN_LOG)
@@ -754,31 +1389,478 @@ def _read_scans(limit: int) -> list[dict]:
             "title":           (entry.get("trucks") or [{}])[0].get("name") if entry.get("trucks") else None,
             "status":          "scanned",
         })
+    _stitch_login_to_scans(out)
     return out
+
+
+def _stitch_login_to_scans(scans: list[dict]) -> None:
+    """Attach login_ok/email/error to each scan by matching the closest row
+    in good360_login_attempts within ±15s.
+
+    The monitor records both timestamps: scans.ts is ET-naive (e.g.
+    "2026-05-12 13:28:22") and good360_login_attempts.ts is UTC-naive
+    (sqlite's datetime('now')). We parse scan ts as ET, convert to UTC,
+    then range-query the login table once per request — cheap enough to
+    run on every /api/admin/scans call.
+
+    Mutates the input list in place.
+    """
+    if not scans:
+        return
+
+    parsed: list[tuple[dict, datetime]] = []
+    for s in scans:
+        t = s.get("time")
+        if not t:
+            continue
+        try:
+            dt_et = datetime.strptime(t, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_ET_TZ)
+            parsed.append((s, dt_et.astimezone(UTC)))
+        except (ValueError, TypeError):
+            continue
+    if not parsed:
+        return
+
+    window_seconds = 20
+    min_t = min(u for _s, u in parsed) - timedelta(seconds=window_seconds)
+    max_t = max(u for _s, u in parsed) + timedelta(seconds=window_seconds)
+
+    fmt = "%Y-%m-%d %H:%M:%S"
+    try:
+        with get_conn() as c:
+            rows = c.execute(
+                "SELECT ts, source, email, success, error "
+                "FROM good360_login_attempts "
+                "WHERE source = 'monitor' AND ts >= ? AND ts <= ? "
+                "ORDER BY ts ASC",
+                (min_t.strftime(fmt), max_t.strftime(fmt)),
+            ).fetchall()
+    except Exception:
+        return
+
+    attempts: list[tuple[datetime, dict]] = []
+    for r in rows:
+        try:
+            ts_utc = datetime.strptime(r["ts"], fmt).replace(tzinfo=UTC)
+            attempts.append((ts_utc, r))
+        except (ValueError, TypeError):
+            continue
+    if not attempts:
+        return
+
+    best_delta = timedelta(seconds=15)
+    for scan, scan_utc in parsed:
+        nearest = None
+        nearest_delta = best_delta
+        for a_ts, a_row in attempts:
+            d = abs(a_ts - scan_utc)
+            if d <= nearest_delta:
+                nearest = a_row
+                nearest_delta = d
+        if nearest is not None:
+            scan["login_ok"] = bool(nearest["success"])
+            scan["login_email"] = nearest["email"]
+            scan["login_error"] = nearest["error"]
+
+
+# Ignore-list lives as a JSON file in the workdir volume so the monitor
+# container (separate Python process, no DB import) can read it cheaply
+# on every scan without an HTTP roundtrip back to this service.
+IGNORED_PRODUCTS_FILE = Path(WORKDIR) / "ignored_products.json"
+
+
+def _load_ignored_products() -> set[str]:
+    try:
+        data = json.loads(IGNORED_PRODUCTS_FILE.read_text(encoding="utf-8"))
+        return set(data) if isinstance(data, list) else set()
+    except (OSError, json.JSONDecodeError):
+        return set()
+
+
+def _save_ignored_products(names: set[str]) -> None:
+    IGNORED_PRODUCTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = IGNORED_PRODUCTS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(sorted(names), indent=2), encoding="utf-8")
+    tmp.replace(IGNORED_PRODUCTS_FILE)
+
+
+def _is_sandbox_mode() -> bool:
+    return (os.environ.get("SANDBOX_MODE", "") or "").strip().lower() in ("1","true","yes","on")
+
+
+def _url_belongs_to_mode(url: str | None, sandbox: bool) -> bool:
+    """Whether a tracked_product URL matches the current run mode.
+    Sandbox URLs contain sandbox-360.netlify.app; live URLs hit
+    catalog.good360.org. Unknown URLs (None / empty) are shown in both
+    so an operator can still see legacy data."""
+    if not url:
+        return True
+    u = url.lower()
+    if sandbox:
+        return "sandbox-360" in u or "sandbox" in u
+    return "good360.org" in u and "sandbox" not in u
+
+
+@bp.route("/api/admin/scans/products", methods=["GET"])
+@auth.login_required
+def admin_scan_products():
+    """Observed products list, joined with the per-product flags table.
+
+    Rows are pulled from tracked_products (the durable record of every truck
+    name the monitor has ever seen). Observation/availability counts come
+    from scans.trucks_json aggregated on the fly. URL family is filtered
+    to the current SANDBOX_MODE so sandbox + live data don't bleed into
+    each other.
+    """
+    sandbox = _is_sandbox_mode()
+    ignored = _load_ignored_products()
+
+    # Build observation counts from recent scans so the page shows recency
+    # without a separate column. 500 scans ≈ last 8 hours.
+    counts: dict[str, dict] = {}
+    for s in _read_scans(int(request.args.get("limit", "500"))):
+        ts = s.get("time")
+        for t in s.get("trucks") or []:
+            name = (t.get("name") or "").strip()
+            if not name:
+                continue
+            d = counts.setdefault(name, {"obs": 0, "avail": 0, "last_seen": ts})
+            d["obs"] += 1
+            if t.get("available"):
+                d["avail"] += 1
+            if ts and (not d["last_seen"] or ts > d["last_seen"]):
+                d["last_seen"] = ts
+
+    out: list[dict] = []
+    with get_conn() as c:
+        rows = c.execute(
+            "SELECT name, tracked, autobuy_enabled, last_url, last_price, "
+            "       manual_price, description, first_seen, last_seen, updated_at "
+            "FROM tracked_products "
+            "ORDER BY last_seen DESC NULLS LAST, name"
+        ).fetchall()
+    for r in rows:
+        if not _url_belongs_to_mode(r["last_url"], sandbox):
+            continue
+        agg = counts.get(r["name"], {})
+        # Manual override beats scrape — the scan account can't see prices
+        # on the live catalog, so the operator sets the price by hand and
+        # we surface that everywhere as the canonical price.
+        manual = r["manual_price"]
+        scraped = r["last_price"]
+        out.append({
+            "name":             r["name"],
+            "price":            manual if manual is not None else scraped,
+            "manual_price":     manual,
+            "scraped_price":    scraped,
+            "price_source":     "manual" if manual is not None else ("scraped" if scraped is not None else "none"),
+            "tracked":          bool(r["tracked"]),
+            "autobuy_enabled":  bool(r["autobuy_enabled"]),
+            "ignored":          r["name"] in ignored,
+            "description":      r["description"] or "",
+            "last_url":         r["last_url"] or "",
+            "observations":     agg.get("obs", 0),
+            "available_count":  agg.get("avail", 0),
+            "first_seen":       r["first_seen"],
+            "last_seen":        r["last_seen"],
+            "updated_at":       r["updated_at"],
+        })
+
+    return jsonify({
+        "data": out,
+        "count": len(out),
+        "mode": "sandbox" if sandbox else "live",
+    })
+
+
+def _set_product_field(name: str, field: str, value):
+    """Idempotent UPDATE for a single tracked_products field. Returns whether
+    a row matched."""
+    assert field in {"tracked", "autobuy_enabled", "description", "manual_price"}
+    with get_conn() as c:
+        cur = c.execute(
+            f"UPDATE tracked_products SET {field} = ?, updated_at = datetime('now') "
+            f"WHERE name = ?",
+            (value, name),
+        )
+        return cur.rowcount > 0
+
+
+@bp.route("/api/admin/scans/products/tracked", methods=["POST"])
+@auth.super_admin_required
+def admin_set_product_tracked():
+    """Tracking flag is now the single off-switch. When tracked is turned
+    off the row is grayed out, no alerts fire, no autobuy runs — and we
+    force autobuy_enabled=0 in the same UPDATE so the two flags can't drift
+    apart (e.g. tracked=off + autobuy=on would be a contradiction)."""
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    tracked = 1 if bool(body.get("tracked")) else 0
+    if not name:
+        return jsonify({"success": False, "error": "name required"}), 400
+    with get_conn() as c:
+        if tracked == 0:
+            cur = c.execute(
+                "UPDATE tracked_products "
+                "SET tracked = 0, autobuy_enabled = 0, updated_at = datetime('now') "
+                "WHERE name = ?",
+                (name,),
+            )
+        else:
+            cur = c.execute(
+                "UPDATE tracked_products "
+                "SET tracked = 1, updated_at = datetime('now') "
+                "WHERE name = ?",
+                (name,),
+            )
+        if cur.rowcount == 0:
+            return jsonify({"success": False, "error": "not found"}), 404
+    auth.audit("set_product_tracked", target=name, detail=str(tracked))
+    return jsonify({
+        "success":         True,
+        "name":            name,
+        "tracked":         bool(tracked),
+        "autobuy_enabled": False if tracked == 0 else None,  # None = unchanged
+    })
+
+
+@bp.route("/api/admin/scans/products/autobuy", methods=["POST"])
+@auth.super_admin_required
+def admin_set_product_autobuy():
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    autobuy = 1 if bool(body.get("autobuy_enabled")) else 0
+    if not name:
+        return jsonify({"success": False, "error": "name required"}), 400
+    ok = _set_product_field(name, "autobuy_enabled", autobuy)
+    if not ok:
+        return jsonify({"success": False, "error": "not found"}), 404
+    auth.audit("set_product_autobuy", target=name, detail=str(autobuy))
+    return jsonify({"success": True, "name": name, "autobuy_enabled": bool(autobuy)})
+
+
+@bp.route("/api/admin/scans/products/fetch-price", methods=["POST"])
+@auth.super_admin_required
+def admin_fetch_product_price():
+    """Ask the daemon to drive its live browser through cart/checkout for
+    `name` and read back the price Good360 hides on the listing. The
+    daemon needs both an org_key (for credentials) and the product URL;
+    we look both up from tracked_products. Saves the result as last_price
+    on success so the Price column updates automatically."""
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "name required"}), 400
+    with get_conn() as c:
+        row = c.execute(
+            "SELECT last_url FROM tracked_products WHERE name = ?",
+            (name,),
+        ).fetchone()
+    if not row or not row["last_url"]:
+        return jsonify({"success": False, "error": "product has no known URL — wait for the next scan or pick a different product"}), 404
+
+    # Pick an org_key with valid credentials. In sandbox we use the legacy
+    # config; in live, any active org in load_orgs works because the daemon
+    # routes through sandbox.org_credentials anyway.
+    try:
+        import sys as _sys
+        if "/app" not in _sys.path:
+            _sys.path.insert(0, "/app")
+        import config as _cfg
+        orgs = _cfg.load_orgs()
+    except Exception as e:
+        return jsonify({"success": False, "error": f"orgs load failed: {e}"}), 500
+    if not orgs:
+        return jsonify({"success": False, "error": "no orgs configured"}), 500
+    org_key = next(iter(orgs.keys()))
+
+    code, body_bytes, _hdrs = _daemon_request(
+        "POST", "/live/fetch_price",
+        {"org_key": org_key, "truck_url": row["last_url"]},
+        timeout=240,
+    )
+    try:
+        result = json.loads(body_bytes or b"{}")
+    except Exception:
+        result = {"status": "ERROR", "message": "daemon returned non-JSON"}
+    price = result.get("price")
+    daemon_status = result.get("status") or "ERROR"
+
+    if isinstance(price, (int, float)) and price > 0:
+        with get_conn() as c:
+            c.execute(
+                "UPDATE tracked_products "
+                "SET last_price = ?, updated_at = datetime('now') "
+                "WHERE name = ?",
+                (float(price), name),
+            )
+        auth.audit("fetch_product_price", target=name, detail=f"${price:.2f}")
+        return jsonify({"success": True, "name": name, "price": float(price),
+                        "status": daemon_status,
+                        "message": result.get("message", "")})
+
+    auth.audit("fetch_product_price", target=name, detail=f"failed: {daemon_status}")
+    return jsonify({
+        "success": False,
+        "name": name,
+        "status": daemon_status,
+        "message": result.get("message") or "no price returned (truck may not be currently available)",
+    }), 200
+
+
+@bp.route("/api/admin/scans/products/price", methods=["POST"])
+@auth.super_admin_required
+def admin_set_product_price():
+    """Set or clear the operator's manual price for a product. Body:
+    {name, price: number | null}. NULL clears the override and falls
+    back to the (usually-NULL) scraped value."""
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    raw  = body.get("price")
+    if not name:
+        return jsonify({"success": False, "error": "name required"}), 400
+    if raw is None or raw == "":
+        price_val = None
+    else:
+        try:
+            price_val = float(raw)
+            if price_val < 0:
+                raise ValueError("negative")
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "error": "price must be a non-negative number or null"}), 400
+    ok = _set_product_field(name, "manual_price", price_val)
+    if not ok:
+        return jsonify({"success": False, "error": "not found"}), 404
+    auth.audit("set_product_price", target=name, detail=str(price_val))
+    return jsonify({"success": True, "name": name, "manual_price": price_val})
+
+
+@bp.route("/api/admin/scans/products/description", methods=["POST"])
+@auth.super_admin_required
+def admin_set_product_description():
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    desc = (body.get("description") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "name required"}), 400
+    ok = _set_product_field(name, "description", desc)
+    if not ok:
+        return jsonify({"success": False, "error": "not found"}), 404
+    auth.audit("set_product_description", target=name, detail=f"len={len(desc)}")
+    return jsonify({"success": True, "name": name, "description": desc})
+
+
+@bp.route("/api/admin/scans/products/ignore", methods=["POST"])
+@auth.login_required
+def admin_set_product_ignore():
+    """Toggle ignore status for a product. Body: {name: str, ignored: bool}.
+
+    Ignored products are skipped by the monitor's autobuy ladder (alert-only).
+    Persisted to workdir/ignored_products.json so the monitor sees the change
+    on its next scan without a restart.
+    """
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    ignored = bool(body.get("ignored"))
+    if not name:
+        return jsonify({"success": False, "error": "name required"}), 400
+
+    current = _load_ignored_products()
+    was_ignored = name in current
+    if ignored:
+        current.add(name)
+    else:
+        current.discard(name)
+    _save_ignored_products(current)
+
+    auth.audit(
+        "set_product_ignore",
+        target=name,
+        detail=f"{was_ignored}->{ignored}",
+    )
+    return jsonify({"success": True, "name": name, "ignored": ignored})
+
+
+def _conditional_json(etag: str, build_payload, cache_seconds: int = 0):
+    """Honor If-None-Match: return 304 (no body) when the client's cached
+    ETag matches; otherwise build and return the JSON payload with the
+    current ETag attached. `cache_seconds` sets max-age for browser/proxy
+    caching — 0 forces revalidation on every poll (recommended for our
+    auth'd JSON; the ETag still skips the body 99% of the time)."""
+    inm = (request.headers.get("If-None-Match") or "").strip()
+    quoted = f'"{etag}"'
+    if inm == quoted or inm == etag:
+        resp = Response(status=304)
+        resp.headers["ETag"] = quoted
+        return resp
+    resp = jsonify(build_payload())
+    resp.headers["ETag"] = quoted
+    resp.headers["Cache-Control"] = (
+        f"private, max-age={cache_seconds}" if cache_seconds else "no-cache"
+    )
+    return resp
+
+
+def _scans_etag(limit: int, slim: bool, count_only: bool) -> str:
+    """Cheap version-tag: changes when the newest scan id changes, when the
+    heartbeat file is rewritten, or when query shape changes. SQLite max(id)
+    is an O(1) index lookup."""
+    try:
+        with get_conn() as c:
+            row = c.execute("SELECT COALESCE(MAX(id), 0) AS m FROM scans").fetchone()
+            max_id = int(row["m"]) if row else 0
+    except Exception:
+        max_id = 0
+    try:
+        hb_mtime = int(os.path.getmtime(HEARTBEAT)) if os.path.exists(HEARTBEAT) else 0
+    except OSError:
+        hb_mtime = 0
+    raw = f"{max_id}:{hb_mtime}:{limit}:{int(slim)}:{int(count_only)}"
+    return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
 
 @bp.route("/api/admin/scans", methods=["GET"])
 @auth.login_required
 def admin_scans():
     """Recent scan activity. Reads from the SQL scans table (preferred)
-    or the legacy good360_run_log.json file as a transitional fallback."""
-    limit = request.args.get("limit", 100, type=int)
-    heartbeat = _safe_json(HEARTBEAT)
-    scans = _read_scans(limit)
+    or the legacy good360_run_log.json file as a transitional fallback.
 
-    # Service status — true source of truth for "is the scanner alive".
-    services = _docker_service_states([
-        "monitor", "daemon", "watchdog", "telegram-bot", "missioncontrol", "intake",
-    ])
+    Query params:
+      limit       — number of rows (default 100, capped at 1000)
+      slim=1      — omit per-scan trucks_json (≈10× smaller payload). The main
+                    dashboard poll uses this; the alert poller does not.
+      count_only=1 — return just {count: N} for the sidebar badge.
+    """
+    limit = max(1, min(request.args.get("limit", 100, type=int), 1000))
+    slim = request.args.get("slim") in ("1", "true", "yes")
+    count_only = request.args.get("count_only") in ("1", "true", "yes")
 
-    return jsonify({
-        "success": True,
-        "data": {
-            "scans": scans,
-            "heartbeat": heartbeat,
-            "services": services,
-        },
-    })
+    etag = _scans_etag(limit, slim, count_only)
+
+    def _build():
+        if count_only:
+            try:
+                with get_conn() as c:
+                    n = c.execute("SELECT COUNT(*) AS n FROM scans").fetchone()["n"]
+            except Exception:
+                n = 0
+            return {"success": True, "data": {"count": int(n)}}
+
+        heartbeat = _safe_json(HEARTBEAT)
+        scans = _read_scans(limit, include_trucks=not slim)
+        services = _docker_service_states([
+            "monitor", "daemon", "watchdog", "telegram-bot", "missioncontrol", "intake",
+        ])
+        return {
+            "success": True,
+            "data": {
+                "scans": scans,
+                "heartbeat": heartbeat,
+                "services": services,
+            },
+        }
+
+    return _conditional_json(etag, _build)
 
 
 @bp.route("/api/admin/scans/log-tail", methods=["GET"])
@@ -795,36 +1877,45 @@ def scans_log_tail():
         # Fallback to file if docker logs unavailable for some reason.
         raw_lines = _read_last_lines(CRON_LOG, n)
 
-    classified = []
-    for raw in raw_lines:
-        # Strip the "monitor-1  | " prefix docker-compose adds.
-        line = raw
-        if " | " in line[:40]:
-            line = line.split(" | ", 1)[1]
-        sev = "info"
-        upper = line.upper()
-        if "ERROR" in upper or "FAIL" in upper or "TRACEBACK" in upper or "❌" in line:
-            sev = "error"
-        elif "WARN" in upper or "MISSED" in upper or "⚠" in line:
-            sev = "warn"
-        elif "✅" in line or " SUCCESS" in upper or "PURCHASED" in upper or "[AUTO-BUY: ACTIVE" in line:
-            sev = "ok"
-        elif "[EXCLUDED]" in line or "[TRACKED]" in line or "[skipped]" in line:
-            sev = "info"
-        classified.append({"line": line, "severity": sev})
+    # ETag from the last line + line count — cheap and changes precisely when
+    # new output appears. With _docker_logs cached for 3s, repeat polls within
+    # that window all share the same ETag and short-circuit to 304.
+    tag_seed = (raw_lines[-1] if raw_lines else "") + f"|{len(raw_lines)}|{service}|{n}"
+    etag = hashlib.sha1(tag_seed.encode("utf-8", errors="replace")).hexdigest()[:16]
 
-    return jsonify({
-        "success": True,
-        "data": {
-            "lines": classified,
-            "error_count": sum(1 for l in classified if l["severity"] == "error"),
-            "warn_count":  sum(1 for l in classified if l["severity"] == "warn"),
-            "ok_count":    sum(1 for l in classified if l["severity"] == "ok"),
-            "total": len(classified),
-            "service": service,
-            "source": "docker logs" if raw_lines else "no source",
-        },
-    })
+    def _build():
+        classified = []
+        for raw in raw_lines:
+            # Strip the "monitor-1  | " prefix docker-compose adds.
+            line = raw
+            if " | " in line[:40]:
+                line = line.split(" | ", 1)[1]
+            sev = "info"
+            upper = line.upper()
+            if "ERROR" in upper or "FAIL" in upper or "TRACEBACK" in upper or "❌" in line:
+                sev = "error"
+            elif "WARN" in upper or "MISSED" in upper or "⚠" in line:
+                sev = "warn"
+            elif "✅" in line or " SUCCESS" in upper or "PURCHASED" in upper or "[AUTO-BUY: ACTIVE" in line:
+                sev = "ok"
+            elif "[EXCLUDED]" in line or "[TRACKED]" in line or "[skipped]" in line:
+                sev = "info"
+            classified.append({"line": line, "severity": sev})
+
+        return {
+            "success": True,
+            "data": {
+                "lines": classified,
+                "error_count": sum(1 for l in classified if l["severity"] == "error"),
+                "warn_count":  sum(1 for l in classified if l["severity"] == "warn"),
+                "ok_count":    sum(1 for l in classified if l["severity"] == "ok"),
+                "total": len(classified),
+                "service": service,
+                "source": "docker logs" if raw_lines else "no source",
+            },
+        }
+
+    return _conditional_json(etag, _build)
 
 
 COMPOSE_PROJECT = os.environ.get("COMPOSE_PROJECT_NAME", "good-360-bids")
@@ -891,6 +1982,15 @@ def _read_last_lines(path: str, n: int) -> list[str]:
         return []
 
 
+# `docker compose ps` forks a subprocess and parses container metadata — 50-
+# 300ms of work per call. The scans endpoint asks for it on every poll, so
+# we cache the parsed result. Services don't change state minute-to-minute
+# in steady state, so a 10s TTL is well within operator expectations.
+_DOCKER_SVC_CACHE: dict[tuple[str, ...], tuple[float, list[dict]]] = {}
+_DOCKER_SVC_TTL = 10.0  # seconds
+_DOCKER_SVC_LOCK = threading.Lock()
+
+
 def _docker_service_states(names: list[str]) -> list[dict]:
     """Inspect docker for the given compose services. Best-effort.
 
@@ -899,16 +1999,30 @@ def _docker_service_states(names: list[str]) -> list[dict]:
     it back). The user sees "running" for healthy services and the log tail
     lets them spot a crash-loop separately.
     """
+    key = tuple(names)
+    now = time.monotonic()
+    with _DOCKER_SVC_LOCK:
+        cached = _DOCKER_SVC_CACHE.get(key)
+        if cached and (now - cached[0]) < _DOCKER_SVC_TTL:
+            return cached[1]
+
     if not shutil.which("docker"):
-        return [{"name": n, "state": "unknown", "running": None} for n in names]
+        result = [{"name": n, "state": "unknown", "running": None} for n in names]
+        with _DOCKER_SVC_LOCK:
+            _DOCKER_SVC_CACHE[key] = (now, result)
+        return result
     try:
         proc = subprocess.run(
             ["docker", "compose", "-p", COMPOSE_PROJECT,
              "-f", "/app/docker-compose.yml", "ps", "-a", "--format", "json"],
-            capture_output=True, text=True, timeout=10, cwd="/app",
+            # Tighter timeout — a hung docker probe shouldn't block a poll.
+            capture_output=True, text=True, timeout=4, cwd="/app",
         )
         if proc.returncode != 0:
-            return [{"name": n, "state": "unknown", "running": None} for n in names]
+            result = [{"name": n, "state": "unknown", "running": None} for n in names]
+            with _DOCKER_SVC_LOCK:
+                _DOCKER_SVC_CACHE[key] = (now, result)
+            return result
         # Each service is a separate JSON object on its own line, OR a JSON array
         # depending on compose version. Handle both.
         out = proc.stdout.strip()
@@ -922,8 +2036,6 @@ def _docker_service_states(names: list[str]) -> list[dict]:
                         services.append(json.loads(line))
                     except json.JSONDecodeError:
                         continue
-        by_name = {s.get("Service", s.get("Name", "")).split("-")[-1].rstrip("0123456789"): s for s in services}
-        # The above split is brittle; fall back to substring match.
         result = []
         for n in names:
             match = None
@@ -948,9 +2060,14 @@ def _docker_service_states(names: list[str]) -> list[dict]:
                 })
             else:
                 result.append({"name": n, "state": "stopped", "running": False, "health": None})
+        with _DOCKER_SVC_LOCK:
+            _DOCKER_SVC_CACHE[key] = (now, result)
         return result
     except Exception:
-        return [{"name": n, "state": "unknown", "running": None} for n in names]
+        result = [{"name": n, "state": "unknown", "running": None} for n in names]
+        with _DOCKER_SVC_LOCK:
+            _DOCKER_SVC_CACHE[key] = (now, result)
+        return result
 
 
 ROSTER_DB_PATH = os.environ.get(
@@ -960,23 +2077,44 @@ ROSTER_DB_PATH = os.environ.get(
 
 
 def _roster_purchase_rows(where_sql: str = "", params: tuple = (), limit: int = 200,
-                          days: int | None = None) -> list[dict]:
+                          days: int | None = None, q: str | None = None,
+                          customer_id: str | None = None,
+                          since: str | None = None, until: str | None = None) -> list[dict]:
     """Read joined purchase_attempts + truck_events + nonprofits rows from
     roster.db. Returns rows shaped to the existing /api/admin/purchases
     contract (ts, org_id, truck, total, status, detail) so the UI doesn't
     care that the source switched from JSONL to SQL.
 
     `where_sql` lets callers filter (e.g. by quickbeed_customer_id). It must
-    start with "AND" if non-empty. Empty rows are returned as-is when
-    roster.db is unreachable so the UI can render an empty state instead
-    of a 500."""
+    start with "AND" if non-empty. `q` does a case-insensitive LIKE over
+    truck title, org name, and confirmation number. `since`/`until` are
+    ISO date strings ('YYYY-MM-DD'); when set they override `days`. Empty
+    rows are returned as-is when roster.db is unreachable so the UI can
+    render an empty state instead of a 500."""
     import sqlite3 as _sqlite
     if not os.path.exists(ROSTER_DB_PATH):
         return []
     where_parts = ["1=1"]
-    if days and days > 0:
+    if since:
+        where_parts.append("pa.started_at >= ?")
+        params = (*params, since)
+    if until:
+        # Inclusive upper bound — extend to end-of-day so a single date
+        # picker behaves intuitively.
+        where_parts.append("pa.started_at <= ?")
+        params = (*params, f"{until} 23:59:59")
+    if (not since and not until) and days and days > 0:
         where_parts.append("pa.started_at >= datetime('now', ?)")
         params = (*params, f"-{days} day")
+    if q:
+        like = f"%{q}%"
+        where_parts.append(
+            "(te.truck_title LIKE ? OR np.org_name LIKE ? OR pa.confirmation_number LIKE ?)"
+        )
+        params = (*params, like, like, like)
+    if customer_id:
+        where_parts.append("np.quickbeed_customer_id = ?")
+        params = (*params, customer_id)
     if where_sql:
         where_parts.append(where_sql)
     where = " AND ".join(where_parts)
@@ -1031,20 +2169,417 @@ def _roster_purchase_rows(where_sql: str = "", params: tuple = (), limit: int = 
     return out
 
 
+def _legacy_purchase_rows(limit: int = 200, days: int | None = None,
+                          q: str | None = None, customer_id: str | None = None,
+                          since: str | None = None, until: str | None = None) -> list[dict]:
+    """Read every legacy autobuy attempt from dashboard.db.
+    Shape-compatible with _roster_purchase_rows so the UI doesn't have to
+    know which engine produced a row."""
+    where_parts: list[str] = []
+    params: list = []
+    if since:
+        where_parts.append("ts >= ?")
+        params.append(since)
+    if until:
+        where_parts.append("ts <= ?")
+        params.append(f"{until} 23:59:59")
+    if (not since and not until) and days and days > 0:
+        where_parts.append("ts >= datetime('now', ?)")
+        params.append(f"-{days} day")
+    if q:
+        like = f"%{q}%"
+        where_parts.append(
+            "(truck_name LIKE ? OR customer_name LIKE ? OR org_name LIKE ? OR confirmation_number LIKE ?)"
+        )
+        params.extend([like, like, like, like])
+    if customer_id:
+        where_parts.append("customer_id = ?")
+        params.append(customer_id)
+    where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    sql = f"""
+        SELECT id, ts, status, engine, org_name, customer_id, customer_name,
+               truck_name, truck_url, truck_price, order_total,
+               confirmation_number, error_message, capture_path,
+               screenshot_path, elapsed_seconds
+        FROM legacy_purchase_attempts
+        {where_sql}
+        ORDER BY ts DESC
+        LIMIT ?
+    """
+    params.append(limit)
+    try:
+        with get_conn() as c:
+            rows = c.execute(sql, params).fetchall()
+    except Exception:
+        return []
+    out: list[dict] = []
+    for r in rows:
+        d = dict(r)
+        # UI-compatible aliases — match the keys _roster_purchase_rows uses.
+        d["attempt_id"] = d.pop("id", None)
+        d["org_id"]     = d.get("customer_name") or d.get("org_name") or "—"
+        d["truck"]      = d.get("truck_name") or "—"
+        d["total"]      = d.get("order_total") if d.get("order_total") is not None else d.get("truck_price")
+        d["detail"]     = (
+            d.get("confirmation_number")
+            or d.get("error_message")
+            or ""
+        )
+        d["source"]     = "legacy"
+        d["truck_title"] = d.get("truck_name")
+        out.append(d)
+    return out
+
+
 @bp.route("/api/admin/purchases", methods=["GET"])
 @auth.login_required
 def admin_purchases():
-    """Purchase attempts: pass + fail.
+    """Every purchase attempt — pass and fail — across both engines.
 
-    Reads from `purchase_attempts` in roster.db (the source-of-truth that
-    autobuy_v2 writes to on every attempt), joining truck_events for the
-    truck title and nonprofits for the org name. Returns rows in the same
-    shape the dashboard's older JSONL-backed view used, so existing JS
-    keeps rendering without a rewrite."""
-    limit = max(1, min(request.args.get("limit", 200, type=int), 1000))
-    days = request.args.get("days", 14, type=int)
-    rows = _roster_purchase_rows(limit=limit, days=days)
-    return jsonify({"success": True, "data": rows})
+    Merges:
+      - roster.db.purchase_attempts (the v2 autobuy_v2 path)
+      - dashboard.db.legacy_purchase_attempts (good360_monitor.py via the
+        legacy autobuy script / daemon / agent escalation)
+
+    Tagged with `source` so the UI can show provenance. Sorted by ts desc.
+
+    Query params:
+      limit       — page size (default 50, max 1000)
+      offset      — page offset for pagination (default 0)
+      days        — restrict to last N days (default 14; ignored if since/until set)
+      since       — ISO date 'YYYY-MM-DD' lower bound on attempt timestamp
+      until       — ISO date 'YYYY-MM-DD' upper bound (inclusive end-of-day)
+      q           — case-insensitive LIKE over truck name + org/customer name + confirmation #
+      customer_id — exact match on the QuickBeed customer id
+    """
+    limit  = max(1, min(request.args.get("limit", 50, type=int), 1000))
+    offset = max(0, request.args.get("offset", 0, type=int))
+    days   = request.args.get("days", 14, type=int)
+    since  = (request.args.get("since")  or "").strip() or None
+    until  = (request.args.get("until")  or "").strip() or None
+    q      = (request.args.get("q")      or "").strip() or None
+    customer_id = (request.args.get("customer_id") or "").strip() or None
+
+    # Pull all matching rows from each source up to a hard cap. With the
+    # cap at 5K per source we cover practical pagination depths without
+    # over-fetching.
+    HARD_CAP = 5000
+    roster_rows = _roster_purchase_rows(
+        limit=HARD_CAP, days=days, q=q, customer_id=customer_id,
+        since=since, until=until,
+    )
+    for r in roster_rows:
+        r.setdefault("source", "roster")
+    legacy_rows = _legacy_purchase_rows(
+        limit=HARD_CAP, days=days, q=q, customer_id=customer_id,
+        since=since, until=until,
+    )
+
+    # Merge + sort by ts desc (string compare is fine — both use ISO-ish
+    # 'YYYY-MM-DD HH:MM:SS' from sqlite's datetime('now')).
+    merged = roster_rows + legacy_rows
+    merged.sort(key=lambda r: (r.get("ts") or ""), reverse=True)
+    total = len(merged)
+
+    # Aggregate stats over the FULL filtered set (not just the page) so
+    # the metric strip stays accurate when the operator paginates. Status
+    # canonicalization mirrors the dashboard's isSuccess/isFail helpers.
+    SUCCESS = {"success", "dry_run_ok", "ok"}
+    FAIL_HINTS = ("fail", "error", "missed", "abort", "timeout")
+    ok_n = fail_n = 0
+    spend = 0.0
+    for r in merged:
+        st = (r.get("status") or "").lower()
+        if st in SUCCESS:
+            ok_n += 1
+            spend += float(r.get("order_total") or 0)
+        elif any(h in st for h in FAIL_HINTS):
+            fail_n += 1
+
+    page = merged[offset:offset + limit]
+
+    return jsonify({
+        "success": True,
+        "data":    page,
+        "total":   total,
+        "offset":  offset,
+        "limit":   limit,
+        "has_more": (offset + limit) < total,
+        "counts":  {"roster": len(roster_rows), "legacy": len(legacy_rows), "total": total},
+        "stats":   {"ok": ok_n, "fail": fail_n, "spend": round(spend, 2)},
+    })
+
+
+@bp.route("/api/admin/purchases/<source>/<int:attempt_id>", methods=["DELETE"])
+@auth.super_admin_required
+def admin_delete_purchase(source: str, attempt_id: int):
+    """Hard-delete a single purchase attempt. Source must be 'roster' or
+    'legacy' so we know which database to touch. Audit-logged."""
+    source = source.lower()
+    if source not in ("roster", "legacy"):
+        return jsonify({"success": False, "error": "source must be roster|legacy"}), 400
+
+    if source == "legacy":
+        try:
+            with get_conn() as c:
+                c.execute("DELETE FROM legacy_purchase_attempts WHERE id = ?", (attempt_id,))
+                deleted = c.total_changes
+        except Exception as e:
+            return jsonify({"success": False, "error": f"delete failed: {e}"}), 500
+    else:
+        import sqlite3 as _sqlite
+        if not os.path.exists(ROSTER_DB_PATH):
+            return jsonify({"success": False, "error": "roster.db unavailable"}), 503
+        try:
+            conn = _sqlite.connect(ROSTER_DB_PATH, timeout=5.0)
+            try:
+                cur = conn.execute("DELETE FROM purchase_attempts WHERE id = ?", (attempt_id,))
+                conn.commit()
+                deleted = cur.rowcount
+            finally:
+                conn.close()
+        except _sqlite.Error as e:
+            return jsonify({"success": False, "error": f"delete failed: {e}"}), 500
+
+    if not deleted:
+        return jsonify({"success": False, "error": "not found"}), 404
+
+    auth.audit("purchase.delete", target=f"{source}:{attempt_id}",
+               detail=f"deleted {deleted} row(s)")
+    return jsonify({"success": True, "deleted": deleted})
+
+
+def _load_purchase_row(source: str, attempt_id: int) -> dict | None:
+    """Fetch a single purchase by (source, id), normalized to the same
+    shape `_roster_purchase_rows` / `_legacy_purchase_rows` produce."""
+    if source == "legacy":
+        try:
+            with get_conn() as c:
+                row = c.execute(
+                    "SELECT id AS attempt_id, ts, status, engine, org_name, "
+                    "customer_id, customer_name, truck_name, truck_url, "
+                    "truck_price, order_total, confirmation_number, "
+                    "error_message FROM legacy_purchase_attempts WHERE id = ?",
+                    (attempt_id,),
+                ).fetchone()
+        except Exception:
+            return None
+        if not row:
+            return None
+        d = dict(row)
+        d["source"] = "legacy"
+        d["org_id"] = d.get("customer_name") or d.get("org_name") or "—"
+        d["truck"]  = d.get("truck_name") or "—"
+        d["total"]  = d.get("order_total") or d.get("truck_price")
+        return d
+    if source == "roster":
+        import sqlite3 as _sqlite
+        if not os.path.exists(ROSTER_DB_PATH):
+            return None
+        try:
+            conn = _sqlite.connect(ROSTER_DB_PATH, timeout=5.0)
+            conn.row_factory = _sqlite.Row
+            row = conn.execute(
+                """SELECT pa.id AS attempt_id, pa.status, pa.mode,
+                          COALESCE(pa.completed_at, pa.started_at) AS ts,
+                          pa.error_message, pa.confirmation_number,
+                          pa.order_total, te.truck_title, te.truck_url,
+                          te.truck_price, np.org_name
+                   FROM purchase_attempts pa
+                   LEFT JOIN truck_events te ON te.id = pa.truck_event_id
+                   LEFT JOIN nonprofits   np ON np.id = pa.nonprofit_id
+                   WHERE pa.id = ?""",
+                (attempt_id,),
+            ).fetchone()
+            conn.close()
+        except _sqlite.Error:
+            return None
+        if not row:
+            return None
+        d = dict(row)
+        d["source"] = "roster"
+        d["org_id"] = d.get("org_name") or "—"
+        d["truck"]  = d.get("truck_title") or "—"
+        d["total"]  = d.get("order_total") or d.get("truck_price")
+        return d
+    return None
+
+
+def _load_similar_failures(source: str, attempt_id: int, org_hint: str | None,
+                            status_hint: str | None, limit: int = 10) -> list[dict]:
+    """Pull up to `limit` recent non-success attempts that look similar.
+    Same source as the current row to keep field shapes consistent.
+
+    Heuristic: same org OR same status, last 30 days, exclude self.
+    'Similar' isn't precisely defined here — the AI gets to weigh signal.
+    """
+    rows: list[dict] = []
+    if source == "legacy":
+        try:
+            with get_conn() as c:
+                cur = c.execute(
+                    """SELECT id AS attempt_id, ts, status, org_name,
+                              customer_name, truck_name, truck_url,
+                              order_total, error_message, confirmation_number
+                       FROM legacy_purchase_attempts
+                       WHERE id != ?
+                         AND ts >= datetime('now', '-30 day')
+                         AND status NOT IN ('SUCCESS', 'success', 'dry_run_ok', 'ok')
+                         AND (
+                              (? IS NOT NULL AND (org_name = ? OR customer_name = ?))
+                           OR (? IS NOT NULL AND status = ?)
+                         )
+                       ORDER BY ts DESC
+                       LIMIT ?""",
+                    (attempt_id, org_hint, org_hint, org_hint,
+                     status_hint, status_hint, limit),
+                )
+                for r in cur.fetchall():
+                    rows.append({
+                        "ts": r["ts"], "status": r["status"],
+                        "org_name": r["org_name"] or r["customer_name"],
+                        "truck_name": r["truck_name"],
+                        "order_total": r["order_total"],
+                        "error_message": r["error_message"],
+                        "confirmation_number": r["confirmation_number"],
+                        "source": "legacy",
+                    })
+        except Exception:
+            pass
+    elif source == "roster":
+        import sqlite3 as _sqlite
+        if not os.path.exists(ROSTER_DB_PATH):
+            return []
+        try:
+            conn = _sqlite.connect(ROSTER_DB_PATH, timeout=5.0)
+            conn.row_factory = _sqlite.Row
+            cur = conn.execute(
+                """SELECT pa.id AS attempt_id, pa.status,
+                          COALESCE(pa.completed_at, pa.started_at) AS ts,
+                          pa.error_message, pa.order_total,
+                          te.truck_title, np.org_name
+                   FROM purchase_attempts pa
+                   LEFT JOIN truck_events te ON te.id = pa.truck_event_id
+                   LEFT JOIN nonprofits   np ON np.id = pa.nonprofit_id
+                   WHERE pa.id != ?
+                     AND COALESCE(pa.completed_at, pa.started_at) >= datetime('now', '-30 day')
+                     AND pa.status NOT IN ('success', 'dry_run_ok')
+                     AND (
+                          (? IS NOT NULL AND np.org_name = ?)
+                       OR (? IS NOT NULL AND pa.status = ?)
+                     )
+                   ORDER BY COALESCE(pa.completed_at, pa.started_at) DESC
+                   LIMIT ?""",
+                (attempt_id, org_hint, org_hint, status_hint, status_hint, limit),
+            )
+            for r in cur.fetchall():
+                rows.append({
+                    "ts": r["ts"], "status": r["status"],
+                    "org_name": r["org_name"],
+                    "truck_title": r["truck_title"],
+                    "order_total": r["order_total"],
+                    "error_message": r["error_message"],
+                    "source": "roster",
+                })
+            conn.close()
+        except _sqlite.Error:
+            pass
+    return rows
+
+
+@bp.route("/api/admin/purchases/<source>/<int:attempt_id>/diagnose", methods=["GET"])
+@auth.login_required
+def admin_diagnose_purchase(source: str, attempt_id: int):
+    """AI-generated diagnosis for one purchase attempt. Cached per
+    (source, attempt_id) in the dashboard.db purchase_diagnoses table so
+    re-opens of the same row don't re-bill the Claude API.
+
+    Query params:
+      refresh=1  — bypass the cache and force a re-generation. Useful
+                   after the operator edits the underlying autobuy code
+                   and wants the diagnosis to consider their fix.
+    """
+    source = (source or "").lower()
+    if source not in ("legacy", "roster"):
+        return jsonify({"success": False, "error": "source must be roster|legacy"}), 400
+
+    refresh = request.args.get("refresh") in ("1", "true", "yes")
+
+    # Cache lookup (skip on ?refresh=1)
+    if not refresh:
+        try:
+            with get_conn() as c:
+                row = c.execute(
+                    "SELECT diagnosis, suggested_action, model, similar_count, "
+                    "created_at FROM purchase_diagnoses WHERE source = ? AND attempt_id = ?",
+                    (source, attempt_id),
+                ).fetchone()
+            if row:
+                return jsonify({
+                    "success": True,
+                    "cached":  True,
+                    "data": {
+                        "diagnosis":        row["diagnosis"],
+                        "suggested_action": row["suggested_action"] or "",
+                        "model":            row["model"],
+                        "similar_count":    int(row["similar_count"] or 0),
+                        "generated_at":     row["created_at"],
+                    },
+                })
+        except Exception:
+            # Cache lookup failure isn't fatal — fall through to live call.
+            pass
+
+    purchase = _load_purchase_row(source, attempt_id)
+    if not purchase:
+        return jsonify({"success": False, "error": "purchase not found"}), 404
+
+    org_hint = purchase.get("org_name") or purchase.get("org_id")
+    status_hint = purchase.get("status")
+    similar = _load_similar_failures(source, attempt_id, org_hint, status_hint, limit=10)
+
+    from diagnose import diagnose_failure
+    result = diagnose_failure(purchase, similar)
+    if not result.get("ok"):
+        return jsonify({"success": False, "error": result.get("error", "diagnosis failed")}), 502
+
+    # Persist to cache. Best-effort — if the write fails, we still return
+    # the live result to the operator.
+    try:
+        with get_conn() as c:
+            c.execute(
+                """INSERT OR REPLACE INTO purchase_diagnoses
+                   (source, attempt_id, diagnosis, suggested_action, model,
+                    similar_count, input_tokens, output_tokens, cache_read_tokens)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    source, attempt_id,
+                    result["diagnosis"], result.get("suggested_action") or "",
+                    result.get("model"),
+                    len(similar),
+                    result.get("input_tokens", 0),
+                    result.get("output_tokens", 0),
+                    result.get("cache_read_input_tokens", 0),
+                ),
+            )
+    except Exception:
+        pass
+
+    return jsonify({
+        "success": True,
+        "cached":  False,
+        "data": {
+            "diagnosis":        result["diagnosis"],
+            "suggested_action": result.get("suggested_action") or "",
+            "model":            result.get("model"),
+            "similar_count":    len(similar),
+            "tokens": {
+                "input":      result.get("input_tokens", 0),
+                "output":     result.get("output_tokens", 0),
+                "cache_read": result.get("cache_read_input_tokens", 0),
+            },
+        },
+    })
 
 
 @bp.route("/api/admin/audit", methods=["GET"])
@@ -1395,6 +2930,65 @@ def admin_notifications():
     })
 
 
+@bp.route("/api/admin/notifications/<int:notif_id>", methods=["DELETE"])
+@auth.super_admin_required
+def admin_delete_notification(notif_id: int):
+    """Delete a single notification row. Audit-logged."""
+    try:
+        with get_conn() as c:
+            c.execute("DELETE FROM notifications WHERE id = ?", (notif_id,))
+            deleted = c.total_changes
+    except Exception as e:
+        return jsonify({"success": False, "error": f"delete failed: {e}"}), 500
+    if not deleted:
+        return jsonify({"success": False, "error": "not found"}), 404
+    auth.audit("notification.delete", target=str(notif_id),
+               detail=f"deleted {deleted} row(s)")
+    return jsonify({"success": True, "deleted": deleted})
+
+
+@bp.route("/api/admin/notifications", methods=["DELETE"])
+@auth.super_admin_required
+def admin_delete_notifications_bulk():
+    """Bulk-delete notifications. Without filters this clears the entire
+    table; with `level` or `source` it only deletes matching rows. The
+    same filter shape as GET /api/admin/notifications, so the UI can wire
+    a single 'Clear filtered' button to whatever filter is active."""
+    level  = (request.args.get("level")  or "").strip().lower()
+    source = (request.args.get("source") or "").strip().lower()
+    confirm = request.args.get("confirm") in ("1", "true", "yes")
+
+    # Require an explicit confirm flag for the unfiltered nuke — protects
+    # against accidental "clear all" hits with no filters set.
+    if not level and not source and not confirm:
+        return jsonify({
+            "success": False,
+            "error": "bulk delete without filter requires ?confirm=1",
+        }), 400
+
+    where = []
+    params: list = []
+    if level in ("info", "warn", "error", "success"):
+        where.append("level = ?")
+        params.append(level)
+    if source:
+        where.append("source = ?")
+        params.append(source)
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+    try:
+        with get_conn() as c:
+            c.execute(f"DELETE FROM notifications {where_sql}", params)
+            deleted = c.total_changes
+    except Exception as e:
+        return jsonify({"success": False, "error": f"delete failed: {e}"}), 500
+
+    auth.audit("notification.delete_bulk",
+               target=f"level={level or '*'};source={source or '*'}",
+               detail=f"deleted {deleted} row(s)")
+    return jsonify({"success": True, "deleted": deleted})
+
+
 def _safe_json(path: str):
     try:
         with open(path, encoding="utf-8") as f:
@@ -1574,16 +3168,23 @@ def roster_queue():
     who's currently in cool-off. Mirrors the eligibility logic used by
     quickbeed.list_eligible_customers / select_next_round_robin."""
     with get_conn() as c:
-        # Eligible queue, least-recently-used first (matches quickbeed.py).
+        # Eligible queue. Operator's manual_queue_position wins when set;
+        # unranked rows fall back to least-recently-used. Cooldown rows are
+        # excluded here (and re-enter at their manual position once cleared).
+        # Limit raised so the operator sees the full set they can drag.
         eligible = c.execute(
             """SELECT id, organization_name, full_name, priority_level, max_budget,
-                      last_used_at, last_purchase_at, cooldown_until, status, in_rotation
+                      last_used_at, last_purchase_at, cooldown_until, status, in_rotation,
+                      manual_queue_position
                  FROM customers
                 WHERE status = 'active'
                   AND in_rotation = 1
                   AND (cooldown_until IS NULL OR cooldown_until < datetime('now'))
-                ORDER BY COALESCE(last_used_at, '1970-01-01') ASC, id ASC
-                LIMIT 5"""
+                ORDER BY (manual_queue_position IS NULL),
+                         manual_queue_position ASC,
+                         COALESCE(last_used_at, '1970-01-01') ASC,
+                         id ASC
+                LIMIT 50"""
         ).fetchall()
 
         last = c.execute(
@@ -1627,6 +3228,37 @@ def roster_queue():
             },
         },
     })
+
+
+@bp.route("/api/admin/roster/queue/reorder", methods=["POST"])
+@auth.login_required
+def roster_queue_reorder():
+    """Persist the operator's drag-and-drop order. Body: {"order": [id1, id2, ...]}.
+
+    Ranks listed IDs 0..N-1 in manual_queue_position; rows not in the list are
+    cleared (NULL) so they fall back to LRU rotation behind the ranked set.
+    Cooldown still filters at selection time — manual order is a hint, not a
+    bypass.
+    """
+    body = request.get_json(silent=True) or {}
+    order = body.get("order")
+    if not isinstance(order, list):
+        return jsonify({"success": False, "error": "order must be a list of customer ids"}), 400
+    # Clamp absurd payloads but allow the full visible queue (matches the 50
+    # limit in roster_queue) plus headroom.
+    if len(order) > 200:
+        return jsonify({"success": False, "error": "too many ids"}), 400
+    # Stringify defensively — the JS may send numbers; the column is TEXT.
+    ids = [str(x) for x in order if x is not None]
+    with get_conn() as c:
+        # Clear all manual positions first so removed rows fall back to LRU.
+        c.execute("UPDATE customers SET manual_queue_position = NULL")
+        for pos, cid in enumerate(ids):
+            c.execute(
+                "UPDATE customers SET manual_queue_position = ? WHERE id = ?",
+                (pos, cid),
+            )
+    return jsonify({"success": True, "data": {"ranked": len(ids)}})
 
 
 @bp.route("/api/admin/login-attempts", methods=["GET"])
@@ -1855,6 +3487,72 @@ def get_test_run_screenshot(test_id):
                     headers={"Cache-Control": "private, max-age=60"})
 
 
+@bp.route("/api/admin/test-runs/<int:test_id>/diagnose", methods=["GET"])
+@auth.login_required
+def admin_diagnose_test_run(test_id: int):
+    """AI diagnosis for a test_run failure. Reuses the same Claude-via-
+    OpenRouter helper that powers the per-purchase diagnose endpoint, but
+    feeds it the test_runs row shape instead of a legacy_purchase_attempt
+    row. No caching: test runs are operator-triggered diagnostics so the
+    cost of one fresh call per click is negligible."""
+    with get_conn() as c:
+        row = c.execute(
+            "SELECT id, ts, status, customer_name, customer_email, truck_url, "
+            "card_brand, card_last4, result_summary, error, screenshot_path "
+            "FROM test_runs WHERE id = ?",
+            (test_id,),
+        ).fetchone()
+    if not row:
+        return jsonify({"success": False, "error": "test run not found"}), 404
+
+    # Adapt the row into the same dict shape the diagnose helper expects.
+    failure = {
+        "ts":            row["ts"],
+        "status":        row["status"],
+        "reason":        (row["result_summary"] or "").split(":", 1)[0].strip(),
+        "org_id":        row["customer_name"],
+        "truck":         row["truck_url"],
+        "error_message": row["error"],
+        "detail":        row["result_summary"],
+        "source":        "test_run",
+    }
+
+    # Recent FAILED/MISSED test runs as the "similar history" — same
+    # operator, same general failure family. 30-day window.
+    with get_conn() as c:
+        similar_rows = c.execute(
+            "SELECT id, ts, status, customer_name, truck_url, result_summary, error "
+            "FROM test_runs "
+            "WHERE id != ? AND status IN ('failed', 'completed') "
+            "  AND ts >= datetime('now', '-30 day') "
+            "ORDER BY ts DESC LIMIT 10",
+            (test_id,),
+        ).fetchall()
+    similar = [{
+        "ts":            s["ts"],
+        "status":        s["status"],
+        "org_name":      s["customer_name"],
+        "truck_url":     s["truck_url"],
+        "error_message": s["error"],
+        "detail":        s["result_summary"],
+        "source":        "test_run",
+    } for s in similar_rows]
+
+    from diagnose import diagnose_failure
+    result = diagnose_failure(failure, similar)
+    if not result.get("ok"):
+        return jsonify({"success": False, "error": result.get("error")}), 502
+    return jsonify({
+        "success": True,
+        "data": {
+            "diagnosis":        result["diagnosis"],
+            "suggested_action": result.get("suggested_action") or "",
+            "model":            result.get("model"),
+            "similar_count":    len(similar),
+        },
+    })
+
+
 @bp.route("/api/admin/test-runs/<int:test_id>", methods=["DELETE"])
 @auth.super_admin_required
 def delete_test_run(test_id):
@@ -2023,6 +3721,609 @@ def customer_detail_live(customer_id):
     })
 
 
+@bp.route("/api/admin/live-trucks", methods=["GET"])
+@auth.login_required
+def admin_live_trucks():
+    """Dedup-by-name list of trucks pulled from recent scan rows. Drives
+    the truck dropdown in the per-customer Test Buy modal.
+
+    Query params:
+      window_minutes  — restrict to scans within the last N minutes (default 120)
+      available_only  — when 1, hide trucks the most recent scan marked sold out
+                        (default 0 — show everything we've seen so the operator
+                        can pick "always available" trucks that the monitor
+                        sometimes catches mid-restock as not available)
+      limit           — cap result size (default 100)
+    """
+    window = max(1, min(request.args.get("window_minutes", 120, type=int), 1440))
+    limit  = max(1, min(request.args.get("limit", 100, type=int), 500))
+    available_only = request.args.get("available_only") in ("1", "true", "yes")
+
+    seen: dict[str, dict] = {}  # truck name → most-recent observation
+    try:
+        with get_conn() as c:
+            rows = c.execute(
+                "SELECT ts, trucks_json FROM scans "
+                "WHERE ts >= datetime('now', ?, 'localtime') "
+                "ORDER BY id DESC LIMIT 500",
+                (f"-{window} minutes",),
+            ).fetchall()
+    except Exception:
+        rows = []
+
+    for r in rows:
+        try:
+            trucks = json.loads(r["trucks_json"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for t in trucks:
+            name = (t.get("name") or "").strip()
+            url  = (t.get("url")  or "").strip()
+            if not name or not url:
+                continue
+            # Keep the newest observation per truck name. We DON'T filter
+            # by `available` here — the monitor sometimes catches a truck
+            # mid-restock as not-available and the operator still wants
+            # to test it. The UI shows the availability state next to
+            # the name so the operator can decide.
+            if name not in seen:
+                seen[name] = {
+                    "name":       name,
+                    "url":        url,
+                    "tracked":    bool(t.get("tracked")),
+                    "available":  bool(t.get("available")),
+                    "price":      t.get("price"),
+                    "last_seen":  r["ts"],
+                }
+
+    out = list(seen.values())
+    if available_only:
+        out = [t for t in out if t["available"]]
+    out.sort(key=lambda x: (not x["available"], x.get("last_seen") or ""), reverse=False)
+    # Above: available first (False<True ordering), then by last_seen desc
+    # — re-sort last_seen descending within each group.
+    avail = sorted([t for t in out if t["available"]], key=lambda x: x.get("last_seen") or "", reverse=True)
+    rest  = sorted([t for t in out if not t["available"]], key=lambda x: x.get("last_seen") or "", reverse=True)
+    out = (avail + rest)[:limit]
+
+    return jsonify({
+        "success": True,
+        "data": out,
+        "window_minutes": window,
+        "available_count": sum(1 for t in out if t["available"]),
+        "total_count":     len(out),
+    })
+
+
+@bp.route("/api/admin/customers/<customer_id>/credentials", methods=["GET"])
+@auth.super_admin_required
+def customer_credentials(customer_id: str):
+    """Return the customer's raw Good360 partner credentials (username +
+    password). Super-admin only. Every call audit-logs both locally
+    (admin_audit) and upstream on QuickBeed (reason= is forwarded).
+
+    Used by the eye-toggle on the customer detail page so operators can
+    visually confirm the credentials we'll use to log into Good360 as
+    this customer. NOT to be confused with the safe-projection
+    /customers/<id>/live endpoint, which only returns password_length.
+    """
+    reason = request.args.get("reason") or quickbeed.REASON_CREDENTIAL_USE
+    try:
+        rec = quickbeed.fetch_full(customer_id, reason=reason)
+    except quickbeed.QuickBeedHTTPError as exc:
+        return jsonify({"success": False, "error": str(exc), "status": exc.status}), 502
+    except Exception as exc:  # noqa: BLE001
+        import traceback; traceback.print_exc()
+        return jsonify({"success": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+
+    pc = rec.get("partner_credentials") or {}
+    username = pc.get("username") or ""
+    password = pc.get("password") or ""
+
+    auth.audit("customer_credentials_view",
+               target=customer_id,
+               detail=f"reason={reason}; username_present={bool(username)}; password_present={bool(password)}")
+
+    return jsonify({
+        "success": True,
+        "data": {
+            "username": username,
+            "password": password,
+            "_reason_logged": reason,
+        },
+    })
+
+
+def _build_test_card(card_choice: str, customer_cards: list[dict]) -> tuple[dict | None, str]:
+    """Translate `card_choice` from the UI into a runtime card dict.
+
+    Returns (card_dict, label). card_dict is None when the choice is
+    invalid (caller surfaces the error). Sandbox is the safe default for
+    testing; primary/fallback fetch the customer's real PAN from
+    QuickBeed at request time.
+    """
+    if card_choice == "sandbox":
+        return {
+            "name":    os.environ.get("SANDBOX_CARD_NAME") or "Sandbox Tester",
+            "number":  os.environ.get("SANDBOX_CARD_NUMBER") or "4242424242424242",
+            "expiry":  os.environ.get("SANDBOX_CARD_EXPIRY") or "1230",
+            "cvv":     os.environ.get("SANDBOX_CARD_CVV") or "123",
+            "type":    os.environ.get("SANDBOX_CARD_TYPE") or "visa",
+        }, "sandbox card (4242 4242 4242 4242)"
+
+    cards = customer_cards or []
+    if card_choice == "primary":
+        match = next((c for c in cards if c.get("rank") == "primary"), None) or (cards[0] if cards else None)
+        if not match:
+            return None, "customer has no payment methods on file"
+        return _card_to_org(match), f"primary {match.get('card_network') or 'card'} ****{(match.get('card_number') or '')[-4:]}"
+    if card_choice.startswith("fallback:"):
+        try:
+            idx = int(card_choice.split(":", 1)[1])
+        except ValueError:
+            return None, "bad fallback index"
+        non_primary = [c for c in cards if c.get("rank") != "primary"]
+        if idx < 0 or idx >= len(non_primary):
+            return None, f"fallback #{idx + 1} not found"
+        match = non_primary[idx]
+        return _card_to_org(match), f"fallback #{idx + 1} {match.get('card_network') or 'card'} ****{(match.get('card_number') or '')[-4:]}"
+    return None, f"unknown card_choice {card_choice!r}"
+
+
+def _run_test_purchase_via_daemon(test_id: int, customer_id: str,
+                                  org_config: dict,
+                                  truck_name: str, truck_url: str) -> None:
+    """Background worker: posts to the daemon's /test_checkout and updates
+    the test_runs row with the outcome. Best-effort capture of the capture
+    JSON path so the dashboard can link to it.
+
+    org_key is keyed on the customer (not the test_id) so the daemon
+    reuses the same persistent browser context across test buys for one
+    customer. That means: login cookie persists, subsequent runs skip
+    the cold login round-trip, and the AI gets to see consistent
+    behaviour across attempts.
+    """
+    import urllib.error, urllib.request
+    daemon_url = (os.environ.get("DAEMON_URL", "http://daemon:5002").rstrip("/")
+                  + "/test_checkout")
+    payload = json.dumps({
+        "org_key":    f"customer_{customer_id}",
+        "org_config": org_config,
+        "truck_name": truck_name,
+        "truck_url":  truck_url,
+    }).encode("utf-8")
+    try:
+        with get_conn() as c:
+            c.execute(
+                "UPDATE test_runs SET status=?, started_at=datetime('now'), "
+                "result_summary=? WHERE id=?",
+                ("running", "calling daemon /test_checkout…", test_id),
+            )
+    except Exception:
+        pass
+
+    try:
+        req = urllib.request.Request(
+            daemon_url, data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=300) as r:
+            resp = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = (e.read() or b"").decode("utf-8", errors="replace")[:500]
+        resp = {"status": "FAILED", "message": f"daemon HTTP {e.code}: {body}"}
+    except Exception as e:
+        resp = {"status": "FAILED", "message": f"daemon call failed: {type(e).__name__}: {e}"}
+
+    status      = (resp.get("status") or "FAILED").upper()
+    message     = resp.get("message") or ""
+    capture     = resp.get("capture_path") or None
+    # Map daemon statuses to test_runs.status (completed/failed) per the
+    # same convention the AI-agent runner uses.
+    # CARD_DECLINED is a "completed" run with a card-rejection message —
+    # the autobuy flow ran end-to-end and reached the payment processor.
+    # That's a valid sandbox-test outcome, not an autobuy bug.
+    final_status = "completed" if status in ("SUCCESS", "MISSED", "MANUAL",
+                                              "CARD_DECLINED") else \
+                   "failed"    if status in ("FAILED", "BLOCKED") else \
+                   "completed"  # unknown → record as completed so the operator sees the message
+    try:
+        with get_conn() as c:
+            c.execute(
+                "UPDATE test_runs SET status=?, finished_at=datetime('now'), "
+                "result_summary=?, error=?, screenshot_path=COALESCE(?, screenshot_path) WHERE id=?",
+                (final_status, f"{status}: {message[:400]}",
+                 message if final_status == "failed" else None,
+                 capture, test_id),
+            )
+    except Exception:
+        pass
+
+
+@bp.route("/api/admin/customers/<customer_id>/test-purchase", methods=["POST"])
+@auth.super_admin_required
+def customer_test_purchase(customer_id: str):
+    """Operator-triggered test buy for a specific customer + truck + card.
+
+    Body:
+      truck_url   — required; the Good360 truck listing URL
+      truck_name  — optional; for the cart-contents assertion + alerts
+      card_choice — "sandbox" | "primary" | "fallback:N" (default sandbox)
+
+    Returns immediately with a test_runs id so the UI can poll. The
+    actual checkout runs in a background thread and posts to the
+    daemon's /test_checkout endpoint with an inline org_config built
+    from this customer's QuickBeed partner credentials + selected card.
+    """
+    body = request.get_json(silent=True) or {}
+    truck_url   = (body.get("truck_url")   or "").strip()
+    truck_name  = (body.get("truck_name")  or "(test buy)").strip()
+    card_choice = (body.get("card_choice") or "sandbox").strip()
+
+    if not truck_url:
+        return jsonify({"success": False, "error": "truck_url is required"}), 400
+
+    # 1. Pull this customer's partner credentials + cards fresh.
+    try:
+        rec = quickbeed.fetch_full(customer_id, reason=quickbeed.REASON_CREDENTIAL_USE)
+    except quickbeed.QuickBeedHTTPError as exc:
+        return jsonify({"success": False, "error": f"QuickBeed: {exc}"}), 502
+    except Exception as exc:  # noqa: BLE001
+        import traceback; traceback.print_exc()
+        return jsonify({"success": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+
+    pc      = rec.get("partner_credentials") or {}
+    cards   = rec.get("payment_methods") or []
+    profile = rec.get("profile") or {}
+    ops     = rec.get("operations") or {}
+
+    email = pc.get("username") or ""
+    password = pc.get("password") or ""
+    if not email or not password:
+        return jsonify({"success": False,
+                        "error": "customer has no partner credentials"}), 400
+
+    # 2. Translate card_choice → runtime card dict.
+    card, card_label = _build_test_card(card_choice, cards)
+    if card is None:
+        return jsonify({"success": False, "error": card_label}), 400
+
+    # 3. Rate-limit on hourly cap. Bumped to 100 by default (was 3) so
+    # active operator testing isn't blocked; set TEST_RUN_HOURLY_LIMIT=0
+    # in Settings to disable the cap entirely.
+    try:
+        hourly_cap = int(os.environ.get("TEST_RUN_HOURLY_LIMIT", "100"))
+    except ValueError:
+        hourly_cap = 100
+    if hourly_cap > 0:
+        with get_conn() as c:
+            recent = c.execute(
+                "SELECT COUNT(*) AS n, MIN(ts) AS earliest "
+                "FROM test_runs WHERE ts >= datetime('now', '-1 hour')"
+            ).fetchone()
+        if (recent["n"] or 0) >= hourly_cap:
+            return jsonify({
+                "success": False,
+                "error": (f"Rate limit: {hourly_cap} test runs per hour. "
+                          f"Wait until {recent['earliest']} UTC falls out of the "
+                          f"trailing hour, set TEST_RUN_HOURLY_LIMIT=0 to disable."),
+            }), 429
+
+    # 4. Build the org_config the daemon will use to log in + check out.
+    # Pull billing-address fields from the *primary* card's billing
+    # address — that's the only customer-sourced billing data we have.
+    # If missing, the daemon will fail at the checkout step rather than
+    # invent values: per feedback, form-fill data must come from the
+    # customer record (no hardcoded defaults).
+    primary_card = next((c for c in cards if c.get("rank") == "primary"), None) \
+                   or (cards[0] if cards else None)
+    primary_billing = (primary_card or {}).get("billing_address") or {}
+    name_on_card = (primary_card or {}).get("name_on_card") or profile.get("full_name") or ""
+    name_parts = name_on_card.split()
+    billing_first = name_parts[0] if name_parts else ""
+    billing_last  = " ".join(name_parts[1:]) if len(name_parts) > 1 else ""
+
+    org_config = {
+        "name":              profile.get("organization_name") or customer_id,
+        "good360_email":     email,
+        "good360_password":  password,
+        "card":              card,
+        "warehouse_address": ops.get("warehouse_address") or "",
+        "contact_name":      profile.get("full_name") or "",
+        "contact_phone":     profile.get("phone") or "",
+        "billing_address":   {
+            "firstname": billing_first,
+            "lastname":  billing_last,
+            "street":    primary_billing.get("street") or "",
+            "city":      primary_billing.get("city") or "",
+            "state":     primary_billing.get("state") or "",
+            "postcode":  primary_billing.get("zip") or "",
+            "telephone": profile.get("phone") or "",
+            "country":   primary_billing.get("country") or "US",
+        },
+        "checkout_answers":  {
+            "people_helped":       str(ops.get("people_served") or ""),
+            "distribution_method": ops.get("distribution_method") or "",
+            "warehouse_address":   ops.get("warehouse_address") or "",
+            "dock_pallet":         "Yes, we have a dock" if ops.get("has_loading_dock") else "No dock",
+        },
+        "max_price":         ops.get("max_budget"),
+    }
+
+    customer_name  = profile.get("full_name") or profile.get("organization_name") or "(unknown)"
+    customer_email = profile.get("email") or ""
+    u = auth.current_user() or {}
+
+    with get_conn() as c:
+        cur = c.execute(
+            """INSERT INTO test_runs (status, customer_name, customer_email, truck_url,
+                  card_brand, card_last4, result_summary, created_by_user_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("queued", customer_name, customer_email, truck_url,
+             (card.get("type") or "")[:20],
+             ((card.get("number") or "")[-4:] or "????"),
+             # Surface the login email so the operator can verify at a
+             # glance that the customer's own Good360 credentials are
+             # being used (not a shared master account).
+             f"queued — login_as={email} card={card_label}",
+             u.get("id")),
+        )
+        test_id = cur.lastrowid
+        c.execute(
+            "INSERT INTO admin_audit(user_id, user_email, action, target, detail, ip) "
+            "VALUES (?,?,?,?,?,?)",
+            (u.get("id"), u.get("email"), "customer.test_purchase",
+             f"test_run:{test_id};customer:{customer_id}",
+             f"customer={customer_id} login_as={email} card={card_label} truck={truck_url}",
+             request.remote_addr),
+        )
+
+    # 5. Spawn the daemon-call thread. Don't block the HTTP response —
+    # the checkout takes 30–90s and we want the modal to render its
+    # loading state immediately.
+    t = threading.Thread(
+        target=_run_test_purchase_via_daemon,
+        args=(test_id, customer_id, org_config, truck_name, truck_url),
+        name=f"test_purchase_{test_id}",
+        daemon=True,
+    )
+    t.start()
+
+    # Scrub local card vars so the response object can't leak them.
+    org_config["card"] = "***"; card = None
+    return jsonify({
+        "success": True,
+        "data": {
+            "test_id":     test_id,
+            "card_label":  card_label,
+            "customer_id": customer_id,
+        },
+    })
+
+
+# ============================================================
+# Readiness check — runs the production autobuy code path (autobuy_v2) against
+# one customer with a known-decline fake card. This is the ONLY test entry
+# point that exercises the same code that real autobuy uses, so a passing
+# readiness check for customer X is empirical proof that production autobuy
+# will work for customer X (modulo the final card-decline which we expect).
+# ============================================================
+
+# 4000 0000 0000 0002 is the universal "card declined" PAN; real payment
+# processors return card_declined for it. Hard-coded here on purpose so
+# nothing else in the system can substitute a real PAN by accident.
+_READINESS_FAKE_CARD = {
+    "card_holder_name": "Readiness Test",
+    "card_number":      "4000000000000002",
+    "card_last4":       "0002",
+    "card_expiry_month": 12,
+    "card_expiry_year":  2030,
+    "card_cvv":         "999",
+    "billing_zip":      "30046",
+    "card_type":        "visa",
+}
+
+
+def _classify_readiness_stage(success: bool, status: str, error_message: str) -> str:
+    """Heuristic: map autobuy_v2's CheckoutResult onto the stage of the
+    checkout flow where the run ended. Order matters: credentials and login
+    failures often *mention* downstream stages ("blocks Add to Cart, etc.")
+    so we must classify them first."""
+    if success:
+        return "order_confirmed"
+    msg = (error_message or "").lower()
+    if "declined" in msg or "card was rejected" in msg or "payment failed" in msg \
+            or "payment was declined" in msg:
+        return "card_declined"
+    if "no usable payment_methods" in msg or "no partner credentials" in msg \
+            or "no good360 credentials" in msg or "credentials are rejected" in msg \
+            or "could not sign in" in msg:
+        return "credentials_missing"
+    if ("login did not complete" in msg or "login failed" in msg or "sign-in" in msg
+            or "sign in" in msg or "log in" in msg
+            or "not authorized to log in" in msg or "valid email address" in msg
+            or "account sign-in was incorrect" in msg):
+        return "login"
+    if "place order" in msg or "payment method step" in msg or "credit card details" in msg:
+        return "place_order_focus"
+    if "card field" in msg or "payment field" in msg or "payment step did not load" in msg \
+            or "billing or card fields" in msg:
+        return "payment_form"
+    if "shipping address" in msg or "warehouse address" in msg:
+        return "shipping_address"
+    if "checkout question" in msg or "answer questions" in msg:
+        return "checkout_questions"
+    if ("out of stock" in msg or "checkout is disabled" in msg or "quote" in msg
+            or "could not add" in msg or "add to cart" in msg or "could not locate" in msg
+            or "full truckload" in msg or "truckload/general-products" in msg
+            or "existing cart" in msg or "cart cleanup" in msg
+            or "cannot be added" in msg or "disabled" in msg):
+        return "add_to_cart"
+    return "unknown"
+
+
+def _run_readiness_check_in_background(test_id: int, org_id: int,
+                                       truck_url: str, truck_name: str) -> None:
+    """Worker: imports autobuy_v2, runs attempt_purchase with the fake card
+    override, writes the result onto the test_runs row."""
+    import sys as _sys, traceback as _tb
+    # Repo root is already mounted at /root/good-360-bids in this container
+    # (see docker-compose missioncontrol volumes). Add to sys.path so we
+    # pick up the latest edits to autobuy_v2 without needing a rebuild.
+    for _p in ("/root/good-360-bids", "/root/good-360-bids/good360_roster"):
+        if _p not in _sys.path:
+            _sys.path.insert(0, _p)
+
+    try:
+        from good360_autobuy_v2 import attempt_purchase  # type: ignore
+        import roster_orchestrator as _ro  # type: ignore
+    except Exception as exc:
+        _set_test_run_result(test_id, status="failed",
+                            summary=f"import failed: {type(exc).__name__}: {exc}",
+                            error=_tb.format_exc())
+        return
+
+    _set_test_run_result(test_id, status="running",
+                        summary=f"logging truck_event for org {org_id}…")
+    try:
+        event_id = _ro.log_truck_event(
+            truck_title=truck_name or "(readiness check)",
+            truck_url=truck_url,
+            truck_price=0.0,
+            truck_location="",
+            truck_category="other",   # avoid category-exclusion gates
+            raw_data={"_readiness_check": True, "_fake_card_pan_last4": "0002"},
+        )
+    except Exception as exc:
+        _set_test_run_result(test_id, status="failed",
+                            summary=f"log_truck_event failed: {type(exc).__name__}: {exc}",
+                            error=_tb.format_exc())
+        return
+
+    _set_test_run_result(test_id, status="running",
+                        summary=f"running autobuy_v2.attempt_purchase(org={org_id}, event={event_id})…")
+    try:
+        result = attempt_purchase(org_id, event_id,
+                                  test_card_override=_READINESS_FAKE_CARD)
+    except Exception as exc:
+        _set_test_run_result(test_id, status="failed",
+                            summary=f"attempt_purchase crashed: {type(exc).__name__}: {exc}",
+                            error=_tb.format_exc())
+        return
+
+    stage = _classify_readiness_stage(result.success, result.status, result.error_message or "")
+    summary = f"stage={stage} · status={result.status}"
+    if result.confirmation_number:
+        summary += f" · conf={result.confirmation_number}"
+    _set_test_run_result(
+        test_id,
+        status="completed",
+        summary=summary[:500],
+        error=(result.error_message or None) if not result.success else None,
+    )
+
+
+def _set_test_run_result(test_id: int, *, status: str, summary: str,
+                         error: str | None = None) -> None:
+    """Best-effort UPDATE on the test_runs row for the readiness worker."""
+    try:
+        with get_conn() as c:
+            if status == "running":
+                c.execute(
+                    "UPDATE test_runs SET status=?, result_summary=? WHERE id=?",
+                    (status, summary[:500], test_id),
+                )
+            else:
+                c.execute(
+                    "UPDATE test_runs SET status=?, finished_at=datetime('now'), "
+                    "result_summary=?, error=? WHERE id=?",
+                    (status, summary[:500], error, test_id),
+                )
+    except Exception:
+        pass
+
+
+@bp.route("/api/admin/autobuy-readiness-check", methods=["POST"])
+@auth.super_admin_required
+def autobuy_readiness_check():
+    """Run the production autobuy code path against one customer with a
+    fake (decline-only) card. This is the unified test entry point: it
+    exercises the same autobuy_v2 → MCP-agent stack that real autobuy
+    uses, with only the card swapped — so a passing run for org X means
+    production autobuy will work for org X.
+
+    Body:
+      org_id     — required; roster.db nonprofits.id (not the QuickBeed UUID)
+      truck_url  — required; live Good360 truck listing URL
+      truck_name — optional; defaults to "(readiness check)"
+
+    Side effects suppressed by the test_card_override path inside
+    autobuy_v2: no cooldown, no finding-fee billing, no operator
+    notification. Real autobuy state stays untouched.
+
+    Returns:
+      {test_id, org_id} immediately. Poll /api/admin/test-runs/<test_id>
+      for the running/completed status. Expected runtime per call: 2–6
+      minutes depending on Good360's response time at each step.
+    """
+    body = request.get_json(silent=True) or {}
+    truck_url  = (body.get("truck_url")  or "").strip()
+    truck_name = (body.get("truck_name") or "(readiness check)").strip()
+    try:
+        org_id = int(body.get("org_id"))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "org_id is required and must be an integer"}), 400
+    if not truck_url:
+        return jsonify({"success": False, "error": "truck_url is required"}), 400
+
+    # Resolve org_name for the test_runs row (so the UI can show it
+    # without joining roster.db on every poll).
+    import sys as _sys
+    for _p in ("/root/good-360-bids", "/root/good-360-bids/good360_roster"):
+        if _p not in _sys.path:
+            _sys.path.insert(0, _p)
+    try:
+        from roster_orchestrator import get_db_connection as _roster_conn
+        with _roster_conn() as rc:
+            row = rc.execute("SELECT org_name FROM nonprofits WHERE id=?", (org_id,)).fetchone()
+        org_name = row[0] if row else f"org_id={org_id}"
+    except Exception as exc:
+        return jsonify({"success": False, "error": f"roster lookup failed: {exc}"}), 500
+    if not row:
+        return jsonify({"success": False, "error": f"no nonprofit with id={org_id} in roster.db"}), 404
+
+    u = auth.current_user() or {}
+    with get_conn() as c:
+        cur = c.execute(
+            """INSERT INTO test_runs (status, customer_name, customer_email, truck_url,
+                  card_brand, card_last4, result_summary, created_by_user_id)
+               VALUES ('queued', ?, '', ?, 'visa', '0002', ?, ?)""",
+            (org_name, truck_url,
+             f"queued · autobuy-readiness · org_id={org_id} · fake card ****0002",
+             u.get("id")),
+        )
+        test_id = cur.lastrowid
+        c.execute(
+            "INSERT INTO admin_audit(user_id, user_email, action, target, detail, ip) "
+            "VALUES (?,?,?,?,?,?)",
+            (u.get("id"), u.get("email"), "autobuy.readiness_check",
+             f"test_run:{test_id};org_id:{org_id}",
+             f"org_id={org_id} truck={truck_url}", request.remote_addr),
+        )
+
+    t = threading.Thread(
+        target=_run_readiness_check_in_background,
+        args=(test_id, org_id, truck_url, truck_name),
+        name=f"readiness_check_{test_id}",
+        daemon=True,
+    )
+    t.start()
+
+    return jsonify({"success": True,
+                    "data": {"test_id": test_id, "org_id": org_id, "org_name": org_name}})
+
+
 @bp.route("/api/admin/customers/sync", methods=["POST"])
 @auth.super_admin_required
 def trigger_sync():
@@ -2106,6 +4407,13 @@ def internal_org_config(customer_id):
 
     primary = next((c for c in cards if c.get("rank") == "primary"), None) or (cards[0] if cards else None)
 
+    # billing_address sourced from the primary card on file. Per
+    # [[feedback-customer-data-only]] all form-fill data must come
+    # from the customer record — never hardcoded fallbacks.
+    primary_billing = (primary or {}).get("billing_address") or {}
+    name_on_card = (primary or {}).get("name_on_card") or profile.get("full_name") or ""
+    name_parts = name_on_card.split()
+
     org_config = {
         "quickbeed_customer_id": rec.get("id"),
         "name": profile.get("organization_name"),
@@ -2117,6 +4425,18 @@ def internal_org_config(customer_id):
         "auto_buy_targets": [s.strip() for s in (ops.get("truck_selection") or "").split(",") if s.strip()],
         "card": _card_to_org(primary) if primary else None,
         "fallback_cards": [_card_to_org(c) for c in cards if c is not primary],
+        "contact_name":  profile.get("full_name") or "",
+        "contact_phone": profile.get("phone") or "",
+        "billing_address": {
+            "firstname": name_parts[0] if name_parts else "",
+            "lastname":  " ".join(name_parts[1:]) if len(name_parts) > 1 else "",
+            "street":    primary_billing.get("street") or "",
+            "city":      primary_billing.get("city") or "",
+            "state":     primary_billing.get("state") or "",
+            "postcode":  primary_billing.get("zip") or "",
+            "telephone": profile.get("phone") or "",
+            "country":   primary_billing.get("country") or "US",
+        },
         "checkout_answers": {
             "people_helped": str(ops.get("people_served") or ""),
             "distribution_method": ops.get("distribution_method") or "",

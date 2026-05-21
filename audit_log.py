@@ -57,3 +57,21 @@ def audit(event: str, **fields) -> None:
         # Last-resort: print to stderr so at least container logs capture it.
         import sys
         print(f"[AUDIT-FAIL] {json.dumps(entry, default=str)}", file=sys.stderr)
+
+
+def verify_writable() -> tuple[bool, str]:
+    """Startup probe — confirm the audit directory accepts writes.
+
+    Returns (ok, error_message). `ok=False` means real purchase events would
+    fall through to the stderr fallback path, which is a silent failure mode
+    for the system-of-record. Callers should surface a loud alert when this
+    returns False — don't refuse to run, but make sure an operator sees it.
+    """
+    try:
+        probe = _today_path().parent / ".audit-write-probe"
+        probe.parent.mkdir(parents=True, exist_ok=True)
+        probe.write_text(datetime.now(UTC).isoformat(), encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True, ""
+    except OSError as e:
+        return False, f"{type(e).__name__}: {e}"

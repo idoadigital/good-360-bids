@@ -7,6 +7,10 @@ services:
     build: .
     image: good360-monitor:local
     restart: always
+    # tini reaps zombie chromium subprocesses left behind by Playwright —
+    # without it they accumulate and eventually exhaust the PID table,
+    # wedging the scan loop. Same reason as missioncontrol below.
+    init: true
     command: python good360_monitor.py
     env_file: .env
     volumes:
@@ -23,6 +27,7 @@ services:
       - ./notifications_log.py:/app/notifications_log.py:ro
       - ./sandbox.py:/app/sandbox.py:ro
       - ./audit_log.py:/app/audit_log.py:ro
+      - ./purchase_lock.py:/app/purchase_lock.py:ro
     healthcheck:
       test: ["CMD", "python", "/app/healthcheck.py"]
       interval: 60s
@@ -33,11 +38,17 @@ services:
   daemon:
     image: good360-monitor:local
     restart: always
+    init: true
     command: python good360_daemon.py
     env_file: .env
     volumes:
       - workdir:/app/workdir
       - roster_data:/app/good360_roster/db
+      # Bind-mount so daemon edits land without an image rebuild
+      # (matches the pattern used for monitor / watchdog / telegram-bot).
+      - ./good360_daemon.py:/app/good360_daemon.py:ro
+      - ./purchase_lock.py:/app/purchase_lock.py:ro
+      - ./sandbox.py:/app/sandbox.py:ro
     ports:
       - "5002:5002"
     depends_on: [monitor]
@@ -45,6 +56,7 @@ services:
   watchdog:
     image: good360-monitor:local
     restart: always
+    init: true
     command: python good360_watchdog.py
     env_file: .env
     volumes:
@@ -56,6 +68,7 @@ services:
   telegram-bot:
     image: good360-monitor:local
     restart: always
+    init: true
     command: python good360_telegram_bot.py
     env_file: .env
     volumes:
@@ -73,10 +86,35 @@ services:
     # healthcheck's playwright probe; without this they accumulate as
     # zombies and eventually deadlock the app.
     init: true
-    command: python missioncontrol/server_v2.py
+    # gunicorn (production WSGI) replaces Flask's dev server, whose
+    # threaded-TLS handler leaks sockets in CLOSE_WAIT and eventually
+    # stops accepting connections. Multiple workers prevent a single slow
+    # request (or stuck Python op) from wedging all new TLS handshakes —
+    # the prior 1-worker config produced periodic site-wide unavailability.
+    # The QuickBeed poll thread uses a fcntl flock so only one worker runs
+    # it (see _start_quickbeed_poll_thread in server_v2.py).
+    #
+    # TLS termination now happens in front of this process at the `caddy`
+    # service (Let's Encrypt cert for podhost.club). gunicorn listens in
+    # plain HTTP on the docker bridge network only — never directly
+    # exposed to the public internet.
+    command: >-
+      gunicorn
+      --pythonpath /app/missioncontrol
+      --worker-class gthread
+      --workers 3
+      --threads 8
+      --bind 0.0.0.0:5001
+      --forwarded-allow-ips=*
+      --timeout 60
+      --graceful-timeout 30
+      --keep-alive 5
+      --access-logfile -
+      --error-logfile -
+      server_v2:app
     env_file: .env
     healthcheck:
-      test: ["CMD", "curl", "-skf", "--max-time", "5", "https://127.0.0.1:5001/login"]
+      test: ["CMD", "curl", "-sf", "--max-time", "5", "http://127.0.0.1:5001/login"]
       interval: 60s
       timeout: 10s
       start_period: 30s
@@ -112,8 +150,30 @@ services:
       # Shared roster.db so missioncontrol can sync QuickBeed customers into
       # the nonprofits table that monitor/daemon's orchestrator reads from.
       - roster_data:/app/good360_roster/db
+    # No host port mapping: missioncontrol is reachable only over the
+    # docker bridge network. Public traffic enters via caddy on 443.
+    expose:
+      - "5001"
+
+  caddy:
+    image: caddy:2
+    restart: always
+    # Caddy binds 80 + 443 on the host and terminates TLS for
+    # podhost.club. ACME HTTP-01 challenge needs port 80; the redirect to
+    # https is added automatically.
     ports:
-      - "5001:5001"
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3 (QUIC)
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Cert state persists across container recreations. Without this,
+      # every `compose up -d` would request a fresh Let's Encrypt cert
+      # and we'd hit the 5-per-week rate limit fast.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - missioncontrol
 
   intake:
     image: good360-monitor:local
@@ -128,3 +188,5 @@ services:
 volumes:
   workdir:
   roster_data:
+  caddy_data:
+  caddy_config:

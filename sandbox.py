@@ -16,9 +16,9 @@ from urllib.parse import urljoin
 LIVE_BASE_URL = "https://catalog.good360.org"
 LIVE_LOGIN_URL = "https://catalog.good360.org/marketplace/home"
 LIVE_BROWSE_URL = "https://catalog.good360.org/marketplace/browse-goods/truckload-donations/amazon.html"
-LIVE_CART_URL = "https://marketplace.good360.org/cart"
+LIVE_CART_URL = "https://catalog.good360.org/marketplace/cart"
 LIVE_CHECKOUT_URL = "https://catalog.good360.org/marketplace/checkout/cart"
-LIVE_AUTOBUY_LOGIN_URL = "https://marketplace.good360.org/login"
+LIVE_AUTOBUY_LOGIN_URL = "https://catalog.good360.org/marketplace/sign-in"
 
 DEFAULT_SANDBOX_BASE_URL = "https://sandbox-360.netlify.app"
 

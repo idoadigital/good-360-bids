@@ -108,7 +108,8 @@ CREATE TABLE IF NOT EXISTS customers (
     in_rotation         INTEGER NOT NULL DEFAULT 1,      -- local override; ANDed with status=='active'
     cooldown_until      TEXT,                            -- local: post-purchase cooldown
     last_used_at        TEXT,                            -- local: last round-robin pick
-    last_purchase_at    TEXT
+    last_purchase_at    TEXT,
+    manual_queue_position INTEGER                        -- operator's drag-and-drop order; NULL = unranked (LRU fallback)
 );
 CREATE INDEX IF NOT EXISTS idx_customers_status ON customers(status);
 CREATE INDEX IF NOT EXISTS idx_customers_updated ON customers(updated_at);
@@ -213,6 +214,67 @@ CREATE TABLE IF NOT EXISTS scans (
     trucks_json  TEXT NOT NULL DEFAULT '[]'  -- list of {name, available, tracked}
 );
 CREATE INDEX IF NOT EXISTS idx_scans_ts ON scans(ts);
+
+-- Per-product state: the operator's per-truck-name tracking/autobuy flags.
+-- The monitor upserts a row on every observation; the dashboard mutates the
+-- flags via the Scans → Observed products UI. `last_url` is what filters
+-- this table by sandbox-vs-live (rows whose url contains sandbox-360 are
+-- only shown in sandbox mode, etc.).
+CREATE TABLE IF NOT EXISTS tracked_products (
+    name             TEXT PRIMARY KEY,
+    tracked          INTEGER NOT NULL DEFAULT 1,    -- 1 = scan + alert; 0 = grayed out, ignored entirely
+    autobuy_enabled  INTEGER NOT NULL DEFAULT 0,    -- 1 = attempt purchase when available
+    last_url         TEXT,
+    last_price       REAL,                          -- last price scraped (NULL when account can't see prices)
+    manual_price     REAL,                          -- operator override; takes precedence over last_price
+    description      TEXT,
+    first_seen       TEXT,
+    last_seen        TEXT,
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_tracked_products_last_seen ON tracked_products(last_seen);
+
+-- Every autobuy attempt the legacy monitor (good360_monitor.py + autobuy.py)
+-- makes. Denormalized on purpose so the monitor doesn't have to populate
+-- truck_events / nonprofits / payment_methods to log a row. The Purchases
+-- page UNIONs this with the v2 roster.db.purchase_attempts table to give
+-- one consolidated history regardless of which engine ran.
+CREATE TABLE IF NOT EXISTS legacy_purchase_attempts (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                   TEXT NOT NULL DEFAULT (datetime('now')),
+    status               TEXT NOT NULL,         -- SUCCESS|FAILED|MISSED|MANUAL|COOLDOWN|LOCKED|ERROR|...
+    engine               TEXT,                  -- daemon|script|devtools_agent
+    org_name             TEXT,                  -- legacy org config name (e.g. Reviving Homes Foundation)
+    customer_id          TEXT,                  -- QuickBeed UUID if a customer was queued, else NULL
+    customer_name        TEXT,
+    truck_name           TEXT,
+    truck_url            TEXT,
+    truck_price          REAL,
+    order_total          REAL,
+    confirmation_number  TEXT,
+    error_message        TEXT,
+    capture_path         TEXT,                  -- workdir-relative path into checkout_captures/
+    screenshot_path      TEXT,
+    elapsed_seconds      REAL
+);
+CREATE INDEX IF NOT EXISTS idx_legacy_pa_ts ON legacy_purchase_attempts(ts);
+
+-- AI-generated diagnosis for failed purchases. Keyed by (source, attempt_id)
+-- so a single attempt only ever incurs one Claude call. `model` is recorded
+-- for evolvability — when we switch models, regenerate where it'd help.
+CREATE TABLE IF NOT EXISTS purchase_diagnoses (
+    source            TEXT NOT NULL,        -- 'roster' | 'legacy'
+    attempt_id        INTEGER NOT NULL,
+    diagnosis         TEXT NOT NULL,
+    suggested_action  TEXT,
+    model             TEXT,
+    similar_count     INTEGER NOT NULL DEFAULT 0,
+    input_tokens      INTEGER,
+    output_tokens     INTEGER,
+    cache_read_tokens INTEGER,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (source, attempt_id)
+);
 """
 
 
@@ -236,6 +298,26 @@ def get_conn():
 def init_db() -> None:
     with _lock, get_conn() as c:
         c.executescript(SCHEMA)
+        _apply_migrations(c)
+
+
+def _apply_migrations(c) -> None:
+    """Idempotent ALTER TABLE migrations for columns added after the
+    initial CREATE. SQLite's CREATE TABLE IF NOT EXISTS only acts on
+    fresh databases — for existing dbs we need to add columns explicitly.
+    Each migration is wrapped in try/except so re-runs are no-ops."""
+    migrations = [
+        # 2026-05-12: operator-set manual price (account can't see prices)
+        "ALTER TABLE tracked_products ADD COLUMN manual_price REAL",
+        # 2026-05-14: drag-and-drop queue ordering; NULL = unranked, LRU fallback
+        "ALTER TABLE customers ADD COLUMN manual_queue_position INTEGER",
+    ]
+    for sql in migrations:
+        try:
+            c.execute(sql)
+        except sqlite3.OperationalError:
+            # Column already exists — that's the expected steady state.
+            pass
 
 
 def has_any_user() -> bool:

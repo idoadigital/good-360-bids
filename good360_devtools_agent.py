@@ -21,7 +21,11 @@ from typing import Any
 import config as _cfg
 
 
-DEFAULT_MODEL = os.environ.get("DEVTOOLS_AGENT_MODEL", "gpt-5.1")
+# `os.environ.get("X", default)` returns the env value verbatim when set —
+# even if that value is the empty string. `... or default` falls back on
+# both "missing" and "set but blank" so an unintentional `DEVTOOLS_AGENT_MODEL=`
+# in .env doesn't reach the OpenAI client and 400 us with "model ''".
+DEFAULT_MODEL = os.environ.get("DEVTOOLS_AGENT_MODEL") or "gpt-5.1"
 DEFAULT_MAX_TOTAL = float(os.environ.get("MAX_AUTO_PAY", "6400"))
 
 
@@ -88,6 +92,23 @@ def _load_org(org_key: str) -> dict[str, Any]:
 
     org = dict(org)
     org.setdefault("card", _org_card_from_env(org_key))
+
+    # In sandbox mode, swap to the shared SANDBOX_* credentials and test
+    # card. Matches what the legacy scan + autobuy paths already do via
+    # sandbox.org_credentials() / sandbox.card_for_org(), so the DevTools
+    # agent uses the same identities as everyone else when running against
+    # sandbox-360. No-op in live mode (helpers pass through unchanged).
+    try:
+        import sandbox as _sandbox
+    except ImportError:
+        _sandbox = None
+    if _sandbox is not None and _sandbox.is_sandbox():
+        sbx_email, sbx_password = _sandbox.org_credentials(
+            org.get("good360_email", ""), org.get("good360_password", "")
+        )
+        org["good360_email"] = sbx_email
+        org["good360_password"] = sbx_password
+        org["card"] = _sandbox.card_for_org(org.get("card")) or org.get("card")
     return org
 
 
@@ -162,23 +183,41 @@ Goal:
 - Truck URL: {truck_url}
 - Organization: {org.get("name", org_key)}
 
-Hard safety rules:
-- Do not buy a different truck.
-- Do not continue if the page says sold out, unavailable, no longer available, or out of stock.
-- Do not place the order if the checkout total is greater than ${max_total:.2f}.
-- Do not place the order if you cannot see a final review/submit page for this exact truck.
-- A successful purchase requires real confirmation evidence: order number, order confirmation, order receipt, or equivalent.
-- If dry_run is true, stop immediately before clicking Place Order and return DRY_RUN with evidence.
-- If an unexpected page error, validation error, modal, iframe, or blocked control appears, inspect console/network/DOM, fix the interaction if it is safe, and continue only when the page state is understood.
-- Never report SUCCESS from a product page, cart page, or payment page. SUCCESS only means an order confirmation page exists.
-- If payment fails or is declined, return FAILED and include the visible decline message, validation errors, current URL, relevant console errors, relevant network failures, and the checkout step where it failed in evidence.
-- If payment succeeds, include confirmation number, final URL, order total, and all visible success indicators in evidence.
+Required actions, in order. Do not skip steps. Do not return early until you have either reached an order-confirmation page or hit a hard-stop rule below.
+
+1. Navigate to the truck URL and take a snapshot.
+2. If a login form, login modal, or "sign in to continue" link is present, log in using the provided good360_email and good360_password. The credentials are authorized for this run. Do not refuse to log in.
+3. After login, re-navigate to the truck URL if you are not on it. Verify the page heading matches the requested truck.
+4. Click Add to Cart. If a "view cart" or "checkout" link appears, follow it.
+5. On the cart page, click Checkout / Proceed to Checkout.
+6. Fill the shipping/warehouse address using `warehouse`. If a saved address picker is present, select it.
+7. Answer any checkout questions using `checkout_answers` (people helped, distribution method, dock/pallet, etc.).
+8. Fill the credit-card payment fields using `card` (number, expiry, cvv, name). Inspect iframes if the fields are not directly visible.
+9. Click Place Order. You MUST commit this click when all card fields are visibly filled, the order total is <= ${max_total:.2f}, and no validation error is shown. Do not stop with the button merely focused — clicking is required to complete the run.
+10. After clicking Place Order, wait up to 30 seconds for one of: an order confirmation page (success), a card-declined / payment-failed message (failed), or a validation error (failed).
+
+Hard safety rules (override the steps above only when they fire):
+- Do not buy a different truck. If the page shows a different product than {truck_name!r}, return FAILED.
+- Do not place the order if Good360 marks the truck out of stock / sold out / unavailable BEFORE you click Place Order. Return MISSED.
+- Do not place the order if the checkout total > ${max_total:.2f}. Return MANUAL.
+- A successful purchase requires order-number / order-confirmation evidence on screen.
+- If dry_run is true, stop immediately before step 9 and return DRY_RUN.
+- If the payment field cannot be located (no iframe, no card-number input) after a thorough inspection of the rendered DOM and any payment iframes, return FAILED with a clear "payment fields not rendered" message and the current URL.
+- Never report SUCCESS from anything other than an order-confirmation page.
+
+Result shape:
+- SUCCESS  → include confirmation_number, final_url, order_total, success evidence (visible text + URL).
+- FAILED   → include the visible decline / error message, the step where it failed, current URL, relevant console/network errors. Card-declined responses are a FAILED.
+- MISSED   → truck became unavailable BEFORE Place Order click.
+- MANUAL   → total exceeded max, or a human-only step appeared (multi-factor, CAPTCHA, T&C re-acceptance).
+- DRY_RUN  → dry_run mode, stopped before Place Order.
+- BLOCKED  → unexpected page state we cannot safely act on.
 
 Operational notes:
 - Use Chrome DevTools MCP tools to inspect screenshots, DOM, console messages, and network failures as needed.
 - Prefer accessible labels and visible text when interacting with forms.
-- Payment fields may be iframe-backed; inspect frames before deciding a field is missing.
-- After every major navigation or submit, verify the current URL and visible page text.
+- Payment fields are often iframe-backed (Stripe/Adyen/Worldpay). Always inspect frames before deciding a field is missing.
+- After every major navigation or submit, take a fresh snapshot and verify URL + visible text.
 
 Checkout data:
 {json.dumps(public_payload, indent=2)}
@@ -263,14 +302,20 @@ async def run_agent(
         dry_run=dry_run,
     )
 
+    # MCPServerStdio defaults to 5s per-tool — too tight once the Good360 SPA
+    # starts post-signin redirects (wait_for / take_snapshot bail before the
+    # page settles). 30s is comfortable for normal navigation; configurable
+    # for slow networks.
+    mcp_timeout = int(os.environ.get("DEVTOOLS_MCP_TOOL_TIMEOUT_SECONDS", "30"))
     async with MCPServerStdio(
         name="chrome-devtools",
         params={"command": os.environ.get("DEVTOOLS_MCP_COMMAND", "npx"), "args": mcp_args},
         cache_tools_list=True,
+        client_session_timeout_seconds=mcp_timeout,
     ) as chrome:
         agent = Agent(
             name="Good360 DevTools Checkout Agent",
-            model=os.environ.get("DEVTOOLS_AGENT_MODEL", DEFAULT_MODEL),
+            model=os.environ.get("DEVTOOLS_AGENT_MODEL") or DEFAULT_MODEL,
             instructions=(
                 "Operate Chrome carefully through DevTools MCP. Your final output must match "
                 "CheckoutAgentResult. Refuse unsafe purchases. Verify with page evidence."
@@ -283,7 +328,13 @@ async def run_agent(
             model_settings=ModelSettings(tool_choice="auto"),
             output_type=CheckoutAgentResult,
         )
-        result = await Runner.run(agent, prompt)
+        # max_turns defaults to 10 in openai-agents, which isn't enough for a
+        # real Good360 checkout (navigate → snapshot → login fields → submit →
+        # snapshot → add to cart → snapshot → fill 3 checkout questions →
+        # snapshot → card # → expiry → cvv → place order → confirmation read
+        # is already ~15 tool calls before any retries). Default 60, env-overridable.
+        max_turns = int(os.environ.get("DEVTOOLS_AGENT_MAX_TURNS", "60"))
+        result = await Runner.run(agent, prompt, max_turns=max_turns)
         if isinstance(result.final_output, CheckoutAgentResult):
             return result.final_output
         if isinstance(result.final_output, dict):

@@ -165,7 +165,8 @@ class CheckoutResult:
 # (already in shared .env). missioncontrol serves HTTPS on a self-signed cert
 # inside the Docker network — we set verify=False since this is intra-cluster.
 
-def _load_org_context_quickbeed(org_row, quickbeed_customer_id: str) -> OrgContext:
+def _load_org_context_quickbeed(org_row, quickbeed_customer_id: str,
+                                 *, require_payment_methods: bool = True) -> OrgContext:
     import requests  # local import — keeps top-level imports unchanged for legacy path
 
     base = os.environ.get("MISSIONCONTROL_INTERNAL_URL", "https://missioncontrol:5001")
@@ -220,7 +221,7 @@ def _load_org_context_quickbeed(org_row, quickbeed_customer_id: str) -> OrgConte
             "card_type": c.get("type"),
         })
 
-    if not payment_methods:
+    if not payment_methods and require_payment_methods:
         raise ValueError(
             f"QuickBeed customer {quickbeed_customer_id} has no usable payment_methods; "
             "refusing to attempt purchase"
@@ -256,7 +257,7 @@ def _load_org_context_quickbeed(org_row, quickbeed_customer_id: str) -> OrgConte
     ))
 
 
-def load_org_context(org_id: int) -> OrgContext:
+def load_org_context(org_id: int, *, require_payment_methods: bool = True) -> OrgContext:
     """
     Load full org context.
 
@@ -277,7 +278,9 @@ def load_org_context(org_id: int) -> OrgContext:
         org_keys = org.keys() if hasattr(org, "keys") else []
         qb_id = org["quickbeed_customer_id"] if "quickbeed_customer_id" in org_keys else None
         if qb_id:
-            return _load_org_context_quickbeed(org, qb_id)
+            return _load_org_context_quickbeed(
+                org, qb_id, require_payment_methods=require_payment_methods,
+            )
 
         cred = conn.execute(
             "SELECT * FROM nonprofit_credentials WHERE nonprofit_id = ?", (org_id,)
@@ -459,7 +462,8 @@ class _DevToolsMCPUnavailable(RuntimeError):
 
 
 def _run_checkout_via_devtools_mcp(org: OrgContext, truck: TruckContext,
-                                   payment_card: dict) -> CheckoutResult:
+                                   payment_card: dict,
+                                   *, test_mode: bool = False) -> CheckoutResult:
     """Production checkout dispatched through the Chrome DevTools MCP agent.
 
     Builds an `org_override` dict from the QuickBeed-fetched OrgContext and
@@ -494,7 +498,26 @@ def _run_checkout_via_devtools_mcp(org: OrgContext, truck: TruckContext,
     # Pick the primary warehouse + billing addresses from the QB-supplied list.
     primary_addr = next((a for a in org.addresses if a.get("is_primary")), None) \
                    or (org.addresses[0] if org.addresses else {})
-    warehouse_address = primary_addr.get("address1") or primary_addr.get("address") or ""
+    # Address dict keys differ across sources:
+    #   • QuickBeed loader writes `address_line` (single line, free form)
+    #   • Legacy roster.db.nonprofit_addresses uses `street_line1`/`city`/`state`/`zip_code`
+    #   • Older callers used `address1` / `address`
+    # The agent prompt accepts any single-string warehouse_address, so collapse
+    # whichever shape we got into one string. Without this, the QuickBeed path
+    # passed `""` and the agent stalled on the Shipping address step.
+    warehouse_address = (
+        primary_addr.get("address1")
+        or primary_addr.get("address")
+        or primary_addr.get("address_line")
+        or " ".join(p for p in (
+            primary_addr.get("street_line1"),
+            primary_addr.get("street_line2"),
+            primary_addr.get("city"),
+            primary_addr.get("state"),
+            primary_addr.get("zip_code"),
+        ) if p)
+        or ""
+    )
     billing_address   = (payment_card.get("billing_zip") or "").strip()
 
     org_override = {
@@ -516,11 +539,13 @@ def _run_checkout_via_devtools_mcp(org: OrgContext, truck: TruckContext,
         "max_auto_pay":      float(org.max_price_override or os.environ.get("MAX_AUTO_PAY", "6400")),
     }
 
-    # Dry-run gate: respects QUICKBEED_DRY_RUN for QB-sourced orgs (matches the
-    # existing pre-MCP behavior) so staging keeps not spending money.
+    # Dry-run gate: respects QUICKBEED_DRY_RUN for QB-sourced orgs in production
+    # so staging keeps not spending money. In test_mode we already swapped in a
+    # fake card and suppressed side effects upstream — clicking Place Order is
+    # safe and required so we can observe the real card-decline response.
     qb_dry_run = (os.environ.get("QUICKBEED_DRY_RUN", "").lower() in ("1", "true", "yes"))
     is_qb = getattr(org, "good360_org_id", "sentinel") is None
-    dry_run = qb_dry_run and is_qb
+    dry_run = (qb_dry_run and is_qb) and not test_mode
 
     logger.info(
         "[MCP] dispatching to chrome-devtools-mcp agent · org=%s truck=%s dry_run=%s card=****%s",
@@ -576,10 +601,13 @@ def _run_checkout_via_devtools_mcp(org: OrgContext, truck: TruckContext,
             error_message=None,
         )
     if a_status == "MISSED":
-        return CheckoutResult(success=False, status="missed", mode="auto_buy",
+        # purchase_attempts.status CHECK constraint accepts 'truck_gone' for
+        # the "truck became unavailable" case, not 'missed' (that's the
+        # truck_events table's status). Mismatch crashed the row update.
+        return CheckoutResult(success=False, status="truck_gone", mode="auto_buy",
                              error_message=f"[MCP] {a_msg}")
     if a_status == "MANUAL":
-        return CheckoutResult(success=False, status="manual_required", mode="auto_buy",
+        return CheckoutResult(success=False, status="alerted_manual", mode="auto_buy",
                              error_message=f"[MCP] {a_msg}")
     if a_status == "BLOCKED":
         return CheckoutResult(success=False, status="failed_checkout", mode="auto_buy",
@@ -589,7 +617,8 @@ def _run_checkout_via_devtools_mcp(org: OrgContext, truck: TruckContext,
 
 
 def run_checkout_sequence(org: OrgContext, truck: TruckContext,
-                          payment_card: dict) -> CheckoutResult:
+                          payment_card: dict,
+                          *, test_mode: bool = False) -> CheckoutResult:
     """
     Execute full checkout sequence using browser_agent (Playwright).
     1. Open Good360
@@ -609,9 +638,12 @@ def run_checkout_sequence(org: OrgContext, truck: TruckContext,
     flow exercises end-to-end without spending real money. Required for the
     first staging round per ops policy.
     """
+    # In test_mode the caller has already installed a fake card and suppressed
+    # production side effects, so the dry-run gate is irrelevant — let the
+    # agent click Place Order so we observe the real card-decline response.
     dry_run = os.environ.get("QUICKBEED_DRY_RUN", "").lower() in ("1", "true", "yes")
     is_qb = getattr(org, "good360_org_id", "sentinel") is None  # QB orgs have None here
-    if dry_run and is_qb:
+    if dry_run and is_qb and not test_mode:
         masked_card = (payment_card.get("card_number") or "")[-4:]
         logger.warning(
             "🛑 QUICKBEED_DRY_RUN active — would attempt purchase\n"
@@ -634,7 +666,7 @@ def run_checkout_sequence(org: OrgContext, truck: TruckContext,
     # If MCP is unavailable we surface that as a failed_checkout with a
     # clear error_message so the operator notices and re-installs the SDK.
     try:
-        return _run_checkout_via_devtools_mcp(org, truck, payment_card)
+        return _run_checkout_via_devtools_mcp(org, truck, payment_card, test_mode=test_mode)
     except _DevToolsMCPUnavailable as exc:
         logger.error("DevTools MCP unavailable: %s", exc)
         return CheckoutResult(
@@ -828,7 +860,8 @@ def handle_master_card_fallback(org: OrgContext, truck: TruckContext,
 
 
 # ─── Main Purchase Flow ───────────────────────────────────────────────────────
-def attempt_purchase(org_id: int, truck_event_id: int) -> CheckoutResult:
+def attempt_purchase(org_id: int, truck_event_id: int,
+                     *, test_card_override: dict | None = None) -> CheckoutResult:
     """
     Main entry point for purchasing a truck for an org.
 
@@ -839,34 +872,61 @@ def attempt_purchase(org_id: int, truck_event_id: int) -> CheckoutResult:
     3. Try each payment card (1→2→3)
     4. All cards fail + master_card_fallback=1 + consent → master card fallback
     5. Return CheckoutResult
-    """
-    logger.info(f"Starting purchase: org_id={org_id}, truck_event_id={truck_event_id}")
 
-    # Load contexts
+    test_card_override (optional): a card dict shaped like an entry in
+    org.payment_methods. When supplied, the function:
+      - tolerates a customer with bad / missing real card data
+      - uses the override as the ONLY payment method (no fallbacks)
+      - skips cooldown application, billing fee recording, notifier dispatch,
+        and master-card fallback — i.e. no production-state side effects.
+    This lets the readiness-check / test harness run the exact production
+    code path against any customer without polluting real data or charging
+    a real card.
+    """
+    test_mode = test_card_override is not None
+    logger.info(f"Starting purchase: org_id={org_id}, truck_event_id={truck_event_id}"
+                f"{' [TEST MODE — fake card, side effects suppressed]' if test_mode else ''}")
+
+    # Load contexts. In test mode we tolerate customers whose real card data
+    # in QuickBeed is bad — we're going to swap in the override anyway.
     try:
-        org = load_org_context(org_id)
+        org = load_org_context(org_id, require_payment_methods=not test_mode)
         truck = load_truck_context(truck_event_id)
     except ValueError as e:
         logger.error(f"Context load failed: {e}")
         return CheckoutResult(success=False, status="failed_checkout",
                              mode="auto_buy", error_message=str(e))
 
-    # Mark truck as assigned
-    with get_db_connection() as conn:
-        conn.execute(
-            """UPDATE truck_events
-               SET status='assigned', assigned_to_org_id=?, assigned_at=datetime('now')
-               WHERE id=?""",
-            (org_id, truck_event_id)
-        )
-        conn.commit()
-
-    # Create initial purchase attempt
-    attempt_id = create_purchase_attempt(
-        org_id, truck_event_id,
-        payment_method_id=None,
-        mode="auto_buy" if org.auto_buy_global else "alert_only"
-    )
+    # Mark truck as assigned AND create the matching purchase_attempts row
+    # in one transaction. Previously these were two separate connections /
+    # commits, so a failure on the INSERT would leave truck_events with
+    # status='assigned' but no purchase_attempt — an orphan that confuses
+    # the queue manager and the dashboard.
+    mode = "auto_buy" if org.auto_buy_global else "alert_only"
+    try:
+        with get_db_connection() as conn:
+            try:
+                conn.execute(
+                    """UPDATE truck_events
+                       SET status='assigned', assigned_to_org_id=?, assigned_at=datetime('now')
+                       WHERE id=?""",
+                    (org_id, truck_event_id)
+                )
+                cursor = conn.execute(
+                    """INSERT INTO purchase_attempts
+                       (truck_event_id, nonprofit_id, payment_method_id, mode, status)
+                       VALUES (?, ?, ?, ?, 'in_progress')""",
+                    (truck_event_id, org_id, None, mode)
+                )
+                attempt_id = cursor.lastrowid
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+    except Exception as e:
+        logger.error(f"Failed to record purchase attempt atomically: {e}")
+        return CheckoutResult(success=False, status="failed_checkout",
+                              mode=mode, error_message=f"db_write_failed: {e}")
 
     # Alert-only flow
     if not org.auto_buy_global:
@@ -876,18 +936,33 @@ def attempt_purchase(org_id: int, truck_event_id: int) -> CheckoutResult:
         return result
 
     # Auto-buy flow: try each payment card
-    payment_methods = get_active_payment_methods(org)
-    if not payment_methods:
-        logger.warning(f"Org {org_id} has no valid payment methods")
-        # Fall through to master card check
-        payment_methods = []
+    if test_mode:
+        # Replace real cards with the override. priority/id defaults so the
+        # rest of the loop's bookkeeping doesn't crash on missing keys.
+        override = dict(test_card_override)
+        override.setdefault("id", None)
+        override.setdefault("priority", 1)
+        override.setdefault("card_last4", str(override.get("card_number", ""))[-4:])
+        payment_methods = [override]
+    else:
+        payment_methods = get_active_payment_methods(org)
+        if not payment_methods:
+            logger.warning(f"Org {org_id} has no valid payment methods")
+            # Fall through to master card check
+            payment_methods = []
 
+    # Track the last attempt's result/error so a final "all payment methods
+    # failed" return preserves the underlying agent message (otherwise the
+    # readiness-check classifier and the dashboard can't tell WHICH stage
+    # the run ended on).
+    last_result = None
     for card in payment_methods:
         logger.info(f"Attempting checkout with card #{card['priority']} for org {org_id}")
 
-        result = run_checkout_sequence(org, truck, card)
+        result = run_checkout_sequence(org, truck, card, test_mode=test_mode)
         result.mode = "auto_buy"
         result.payment_method_id = card["id"]
+        last_result = result
 
         if result.success:
             update_purchase_attempt(
@@ -895,37 +970,40 @@ def attempt_purchase(org_id: int, truck_event_id: int) -> CheckoutResult:
                 confirmation_number=result.confirmation_number,
                 order_total=result.order_total,
                 screenshot_path=result.screenshot_path,
-                cooldown_applied=True,
+                cooldown_applied=not test_mode,
             )
 
-            # On success: cooldown + billing
-            from queue_manager import on_purchase_success
-            cooldown_until = on_purchase_success(
-                org_id, truck_event_id, result.confirmation_number
-            )
+            # Production side effects — skipped in test mode so a readiness
+            # check doesn't apply cooldowns, charge finding fees, or dispatch
+            # operator notifications.
+            if not test_mode:
+                from queue_manager import on_purchase_success
+                cooldown_until = on_purchase_success(
+                    org_id, truck_event_id, result.confirmation_number
+                )
 
-            # Billing
-            from billing_manager import record_finding_fee
-            record_finding_fee(org_id, attempt_id, truck.truck_price)
+                from billing_manager import record_finding_fee
+                record_finding_fee(org_id, attempt_id, truck.truck_price)
 
-            # Notification
-            from notifier import notify_purchase_success, start_dispatch_worker
-            start_dispatch_worker()
-            notify_purchase_success(
-                org_id=org_id,
-                truck_event_id=truck_event_id,
-                confirmation_number=result.confirmation_number or "",
-                order_total=result.order_total or truck.truck_price,
-                truck_title=truck.truck_title,
-            )
+                from notifier import notify_purchase_success, start_dispatch_worker
+                start_dispatch_worker()
+                notify_purchase_success(
+                    org_id=org_id,
+                    truck_event_id=truck_event_id,
+                    confirmation_number=result.confirmation_number or "",
+                    order_total=result.order_total or truck.truck_price,
+                    truck_title=truck.truck_title,
+                )
 
             logger.info(f"SUCCESS: org={org_id} truck={truck_event_id} "
-                       f"conf={result.confirmation_number}")
+                       f"conf={result.confirmation_number}"
+                       f"{' [test mode]' if test_mode else ''}")
             return result
 
         else:
-            # Card declined
-            record_card_decline(card["id"])
+            # Card declined / checkout failed
+            if card.get("id") is not None:
+                record_card_decline(card["id"])
             update_purchase_attempt(
                 attempt_id,
                 status="failed_payment" if result.status == "failed_checkout" else result.status,
@@ -934,8 +1012,8 @@ def attempt_purchase(org_id: int, truck_event_id: int) -> CheckoutResult:
             )
             logger.warning(f"Card #{card['priority']} failed: {result.error_message}")
 
-    # All cards failed — try master card fallback
-    if org.master_card_fallback:
+    # All cards failed — try master card fallback (production only)
+    if not test_mode and org.master_card_fallback:
         logger.info(f"All org cards failed — attempting master card fallback for org {org_id}")
         master_result = handle_master_card_fallback(org, truck,
                                                     [c["id"] for c in payment_methods])
@@ -956,9 +1034,14 @@ def attempt_purchase(org_id: int, truck_event_id: int) -> CheckoutResult:
 
             return master_result
 
-    # Complete failure
-    update_purchase_attempt(attempt_id, "failed_payment",
-                            error_message="All payment methods failed")
+    # Complete failure. Surface the most informative error we saw:
+    # the last attempt's underlying agent message if any, else a generic
+    # "no payment methods attempted" so the operator knows the loop never
+    # ran a card.
+    final_err = (last_result.error_message
+                 if (last_result and last_result.error_message)
+                 else "All payment methods failed (no payment methods attempted)")
+    update_purchase_attempt(attempt_id, "failed_payment", error_message=final_err)
 
     with get_db_connection() as conn:
         conn.execute(
@@ -972,7 +1055,7 @@ def attempt_purchase(org_id: int, truck_event_id: int) -> CheckoutResult:
         success=False,
         status="failed_payment",
         mode="auto_buy",
-        error_message="All payment methods failed",
+        error_message=final_err,
     )
 
 

@@ -1,0 +1,40 @@
+# Caddyfile — TLS-terminating reverse proxy in front of Mission Control.
+#
+# Caddy auto-acquires and renews Let's Encrypt certificates for every
+# hostname declared below. The ACME HTTP-01 challenge needs ports 80 + 443
+# open from the public internet — make sure no firewall (or cloud provider
+# network rule) blocks them.
+#
+# `email` lets the ACME CA reach the operator on expiry / renewal failure.
+{
+    email sdibao@gmail.com
+}
+
+# www -> apex redirect, then the apex virtual host. Both share the same
+# upstream so users hitting either form land at Mission Control.
+www.podhost.club {
+    redir https://podhost.club{uri} 308
+}
+
+podhost.club {
+    encode zstd gzip
+
+    # Forward the original client IP + protocol to gunicorn so its access
+    # log records the real source, not the docker bridge IP.
+    reverse_proxy missioncontrol:5001 {
+        header_up X-Real-IP        {remote_host}
+        header_up X-Forwarded-For  {remote_host}
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-Host {host}
+    }
+
+    # HSTS — once a browser sees this, it'll only ever try https for the
+    # next 6 months. Add `includeSubDomains` after you confirm all your
+    # subdomains are also HTTPS-only (intake.podhost.club isn't yet).
+    header Strict-Transport-Security "max-age=15552000"
+
+    # Standard security headers. None of these break the existing app.
+    header X-Content-Type-Options "nosniff"
+    header Referrer-Policy        "strict-origin-when-cross-origin"
+    header X-Frame-Options        "SAMEORIGIN"
+}

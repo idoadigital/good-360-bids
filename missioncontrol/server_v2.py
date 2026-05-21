@@ -689,9 +689,39 @@ def _ssl_context():
     return None
 
 
+_quickbeed_thread_started = False
+_quickbeed_poll_lock_fd = None  # held for the lifetime of the worker
+
+
 def _start_quickbeed_poll_thread():
     """Background fallback for missed webhooks. Runs forever; survives bad
-    QuickBeed config (just sleeps until config is set via the Settings UI)."""
+    QuickBeed config (just sleeps until config is set via the Settings UI).
+
+    With multiple gunicorn workers we need exactly one poller — not N. fcntl
+    flock on a sentinel file coordinates this across forked workers without
+    shared memory. The kernel releases the lock when the holding process
+    exits, so a worker restart re-elects a new poller automatically."""
+    global _quickbeed_thread_started, _quickbeed_poll_lock_fd
+    if _quickbeed_thread_started:
+        return
+
+    import fcntl
+    lock_path = "/tmp/quickbeed.poll.lock"
+    fd = None
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, BlockingIOError):
+        # Another worker already owns the poller — that's the design.
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        return
+    _quickbeed_poll_lock_fd = fd
+    _quickbeed_thread_started = True
+
     import threading
     import time as _time
 
@@ -712,11 +742,15 @@ def _start_quickbeed_poll_thread():
 
     t = threading.Thread(target=loop, name="quickbeed-poll", daemon=True)
     t.start()
-    print('🔄 QuickBeed poll thread started (incremental_sync every QUICKBEED_POLL_INTERVAL_SECONDS)')
+    print(f'🔄 QuickBeed poll thread started in pid={os.getpid()} (incremental_sync every QUICKBEED_POLL_INTERVAL_SECONDS)')
+
+
+# Start background pollers on import so they run under any launcher
+# (gunicorn imports `app`; `python server_v2.py` falls through to __main__).
+_start_quickbeed_poll_thread()
 
 
 if __name__ == '__main__':
-    _start_quickbeed_poll_thread()
     ssl_ctx = _ssl_context()
     scheme = 'https' if ssl_ctx else 'http'
     print('🚀 Starting Mission Control + Admin Dashboard...')

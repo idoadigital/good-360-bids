@@ -7,7 +7,11 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/admin.css">
+    <!-- Mark the document as motion-aware before body parses, so reveal
+         sections start hidden — prevents a flash-of-visible-content
+         before the JS-driven stagger cascade runs. -->
+    <script>document.documentElement.classList.add('motion-ready');</script>
+    <link rel="stylesheet" href="/static/admin.css?v=20260514-testbuy2">
 </head>
 <body class="admin-body">
 
@@ -93,6 +97,14 @@
                 </svg>
                 <span>Test buy</span>
             </button>
+            <button class="nav-item tab super-only" data-tab="liveview">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="2" y="3" width="20" height="14" rx="2"/>
+                    <path d="M8 21h8M12 17v4"/>
+                    <circle cx="12" cy="10" r="3"/>
+                </svg>
+                <span>Live View</span>
+            </button>
             <button class="nav-item tab" data-tab="audit">
                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>
@@ -127,9 +139,19 @@
                 <span class="sep">/</span>
                 <span id="crumbCurrent">Scans</span>
             </div>
-            <div class="system-status" id="systemStatus">
-                <span class="dot" id="systemDot"></span>
-                <span id="systemText">checking…</span>
+            <div class="topbar-right">
+                <button type="button" class="btn btn-ghost btn-restart super-only" id="restartBtn"
+                        title="Restart all containers — the dashboard will briefly drop">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/>
+                    </svg>
+                    <span id="restartBtnLabel">Restart system</span>
+                </button>
+                <div class="system-status" id="systemStatus">
+                    <span class="dot" id="systemDot"></span>
+                    <span id="systemText">checking…</span>
+                </div>
             </div>
         </header>
 
@@ -223,6 +245,16 @@
                             <div class="roster-row__value" id="rosterNext">—</div>
                         </div>
                         <div class="roster-row">
+                            <div class="roster-row__label">
+                                Order
+                                <span class="roster-order-hint" id="rosterOrderHint">drag to reorder</span>
+                            </div>
+                            <div class="roster-row__value">
+                                <ol class="queue-list" id="rosterQueueList"></ol>
+                                <div class="queue-status" id="rosterQueueStatus"></div>
+                            </div>
+                        </div>
+                        <div class="roster-row">
                             <div class="roster-row__label">Last buy</div>
                             <div class="roster-row__value" id="rosterLast">—</div>
                         </div>
@@ -286,6 +318,38 @@
                         </div>
                     </div>
                 </div>
+
+                <div class="surface-card" style="margin-top:var(--space-3)">
+                    <div class="surface-card-head">
+                        <h2>Observed products</h2>
+                        <span class="sub" id="productsSub">unique trucks ever seen — toggle ignore to prevent autobuy</span>
+                    </div>
+                    <div class="surface-card-body flush">
+                        <table class="data expandable" id="productsTable">
+                            <thead><tr>
+                                <th style="width:24px"></th>
+                                <th>Product</th>
+                                <th class="num">Price</th>
+                                <th class="num">Available</th>
+                                <th>Last seen</th>
+                                <th style="width:90px">Tracked</th>
+                                <th style="width:90px">Autobuy</th>
+                            </tr></thead>
+                            <tbody>
+                                <tr><td colspan="7"><div class="empty-state">Loading…</div></td></tr>
+                            </tbody>
+                        </table>
+                        <div class="pagination" id="productsPager" hidden>
+                            <button class="pager-btn" data-pg="prev" aria-label="Previous page">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                            </button>
+                            <span class="pager-info" id="productsPagerInfo">—</span>
+                            <button class="pager-btn" data-pg="next" aria-label="Next page">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
             </section>
 
             <!-- ============ PURCHASES ============ -->
@@ -323,15 +387,41 @@
                 <div class="surface-card">
                     <div class="surface-card-head">
                         <h2>Attempts</h2>
-                        <span class="sub">most recent first</span>
+                        <span class="sub" id="purchSummaryMeta">most recent first</span>
+                    </div>
+                    <div class="toolbar" id="purchToolbar">
+                        <div class="toolbar-search">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                            <input id="purchSearch" type="search" placeholder="Search truck, customer, org, confirmation…">
+                        </div>
+                        <label class="toolbar-date">
+                            <span>From</span>
+                            <input id="purchSince" type="date">
+                        </label>
+                        <label class="toolbar-date">
+                            <span>To</span>
+                            <input id="purchUntil" type="date">
+                        </label>
+                        <button id="purchReset" class="btn btn-ghost" type="button">Clear</button>
                     </div>
                     <div class="surface-card-body flush">
-                        <table class="data" id="purchasesTable">
+                        <table class="data expandable" id="purchasesTable">
                             <thead><tr>
+                                <th style="width:24px"></th>
                                 <th>Time</th><th>Org</th><th>Truck</th><th>Total</th><th>Status</th><th>Detail</th>
+                                <th class="super-only" style="width:36px"></th>
                             </tr></thead>
                             <tbody></tbody>
                         </table>
+                        <div class="pagination" id="purchPager" hidden>
+                            <button class="pager-btn" data-pg="prev" aria-label="Previous page">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                            </button>
+                            <span class="pager-info" id="purchPagerInfo">—</span>
+                            <button class="pager-btn" data-pg="next" aria-label="Next page">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                            </button>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -344,6 +434,10 @@
                         <p class="lede" id="cdSub">—</p>
                     </div>
                     <div class="panel-actions">
+                        <button id="cdTestBuyBtn" class="btn btn-primary super-only" title="Run a test purchase as this customer">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.7 13.4a2 2 0 0 0 2 1.6h9.7a2 2 0 0 0 2-1.6L23 6H6"/></svg>
+                            Test Buy
+                        </button>
                         <button id="cdRevealBtn" class="btn btn-ghost super-only" title="Calls QuickBeed and audit-logs the access">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                             Show full record
@@ -412,13 +506,39 @@
 
                     <div class="surface-card" style="margin-bottom:var(--space-3)">
                         <div class="surface-card-head">
+                            <h2>Rotation &amp; sync state</h2>
+                            <span class="sub">local + QuickBeed mirror bookkeeping</span>
+                        </div>
+                        <div class="surface-card-body">
+                            <dl class="kv-grid" id="cdRotation"></dl>
+                        </div>
+                    </div>
+
+                    <div class="surface-card" style="margin-bottom:var(--space-3)">
+                        <div class="surface-card-head">
                             <h2>Partner credentials</h2>
-                            <span class="sub" id="cdCredsSub">click "Show full record" to reveal</span>
+                            <span class="sub" id="cdCredsSub">click the eye to reveal — every reveal is audit-logged</span>
                         </div>
                         <div class="surface-card-body">
                             <dl class="kv-grid" id="cdCreds">
-                                <dt>username</dt><dd class="mono"><em style="color:var(--text-mute)">hidden — click "Show full record"</em></dd>
-                                <dt>password</dt><dd class="mono"><em style="color:var(--text-mute)">hidden</em></dd>
+                                <dt>email / username</dt>
+                                <dd class="mono cred-row" data-cred-field="username">
+                                    <span class="cred-value" data-state="masked">••••••••</span>
+                                    <button type="button" class="cred-eye super-only" data-cred-toggle="username"
+                                            aria-label="Show username" title="Reveal / hide (audit-logged)">
+                                        <svg class="cred-eye-show" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                                        <svg class="cred-eye-hide" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 8 11 8a18.45 18.45 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                                    </button>
+                                </dd>
+                                <dt>password</dt>
+                                <dd class="mono cred-row" data-cred-field="password">
+                                    <span class="cred-value" data-state="masked">••••••••</span>
+                                    <button type="button" class="cred-eye super-only" data-cred-toggle="password"
+                                            aria-label="Show password" title="Reveal / hide (audit-logged)">
+                                        <svg class="cred-eye-show" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                                        <svg class="cred-eye-hide" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 8 11 8a18.45 18.45 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                                    </button>
+                                </dd>
                             </dl>
                         </div>
                     </div>
@@ -813,7 +933,11 @@
                         <p class="lede">Every alert that's been pushed to Telegram. Mirrored from the dashboard's own log so you can review history without scrolling chat.</p>
                     </div>
                     <div class="panel-actions">
-                        <button id="notifRefreshBtn" class="btn btn-ghost">
+                        <button id="notifClearBtn" class="btn btn-ghost super-only" type="button" title="Delete every notification matching the current level filter">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+                            Clear filtered
+                        </button>
+                        <button id="notifRefreshBtn" class="btn btn-ghost" type="button">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><polyline points="21 3 21 9 15 9"/></svg>
                             Refresh
                         </button>
@@ -1192,6 +1316,83 @@
                 </div>
             </section>
 
+            <!-- ============ LIVE VIEW ============ -->
+            <section data-panel="liveview" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <h1>Live View</h1>
+                        <p class="lede">Pick a customer on the left, then click the field values to copy them into your clipboard. Paste into the live Good360 frame on the right. <b>Note:</b> browser same-origin policy prevents auto-prefill into the iframe — that's why everything is one-click copy.</p>
+                    </div>
+                </div>
+
+                <div class="liveview-grid">
+                    <aside class="liveview-left surface-card">
+                        <div class="surface-card-head">
+                            <h2>Customers</h2>
+                            <span class="sub" id="liveCustomerCount">—</span>
+                        </div>
+                        <div class="surface-card-body">
+                            <input type="search" id="liveCustomerSearch" placeholder="Search customers…" autocomplete="off" class="liveview-search">
+                            <div id="liveCustomerList" class="liveview-customer-list">
+                                <div class="empty-state">Loading…</div>
+                            </div>
+                            <div id="liveCustomerDetail" class="liveview-customer-detail" hidden></div>
+                        </div>
+                    </aside>
+
+                    <section class="liveview-right surface-card">
+                        <div class="surface-card-head liveview-toolbar">
+                            <input type="url" id="liveFrameUrl" placeholder="https://catalog.good360.org/marketplace/... (or paste a truck URL)" autocomplete="off" class="liveview-url-input" value="https://catalog.good360.org/marketplace/home">
+                            <button class="btn btn-ghost" id="liveFrameGoBtn" type="button">Go</button>
+                            <a class="btn btn-ghost" id="liveFrameOpenBtn" target="_blank" rel="noopener" href="https://catalog.good360.org/marketplace/home">Open in new tab ↗</a>
+                        </div>
+                        <div class="surface-card-body liveview-viewport">
+                            <div class="liveview-status" id="liveStatus">Loading catalog.good360.org…</div>
+                            <div class="liveview-frame">
+                                <iframe id="liveFrame" src="https://catalog.good360.org/marketplace/home" referrerpolicy="no-referrer-when-downgrade" sandbox="allow-forms allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"></iframe>
+                            </div>
+                            <div class="liveview-controls">
+                                <span class="sub">If the iframe fails to load, Good360 has blocked embedding — use "Open in new tab" instead.</span>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+            </section>
+
+            <!-- ============ PRODUCT DETAIL (child of Scans) ============ -->
+            <section data-panel="product-detail" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <button class="btn btn-ghost" id="pdBack" type="button" style="margin-bottom:8px">← Back to Scans</button>
+                        <h1 id="pdName">Product</h1>
+                        <p class="lede" id="pdSub">—</p>
+                    </div>
+                </div>
+
+                <div class="surface-card">
+                    <div class="surface-card-head">
+                        <h2>Price &amp; flags</h2>
+                    </div>
+                    <div class="surface-card-body" id="pdFlags">
+                        <!-- rendered by JS -->
+                    </div>
+                </div>
+
+                <div class="surface-card" style="margin-top:var(--space-3)">
+                    <div class="surface-card-head"><h2>Description</h2></div>
+                    <div class="surface-card-body">
+                        <textarea id="pdDescription" class="product-detail__textarea" rows="6"
+                                  placeholder="Add notes about this truck…"></textarea>
+                        <div class="product-detail__hint">Auto-saves when you click outside the box.</div>
+                    </div>
+                </div>
+
+                <div class="surface-card" style="margin-top:var(--space-3)">
+                    <div class="surface-card-head"><h2>Activity</h2></div>
+                    <div class="surface-card-body" id="pdActivity">—</div>
+                </div>
+            </section>
+
             <!-- ============ AUDIT ============ -->
             <section data-panel="audit" class="panel">
                 <div class="panel-header">
@@ -1246,6 +1447,107 @@
     </div>
 </div>
 
-<script src="/static/admin.js"></script>
+<!-- Live availability alert drawer — fixed bottom-right, slides up when a
+     tracked truck flips to AVAILABLE in a scan. Stays open on any tab. -->
+<aside class="alert-drawer" id="alertDrawer" aria-live="polite" aria-label="Truck availability alerts">
+    <div class="alert-drawer-head">
+        <span class="alert-drawer-title">🚚 Live alerts</span>
+        <label class="alert-drawer-mute">
+            <input type="checkbox" id="alertMute"> mute
+        </label>
+        <button class="alert-drawer-clear" id="alertDrawerClear" type="button" title="Dismiss all">clear</button>
+    </div>
+    <div class="alert-drawer-list" id="alertDrawerList"></div>
+</aside>
+
+<div class="lightbox" id="lightbox" hidden role="dialog" aria-modal="true" aria-label="Screenshot viewer">
+    <button class="lightbox-close" id="lbClose" type="button" aria-label="Close">&times;</button>
+    <button class="lightbox-nav lightbox-nav--prev" id="lbPrev" type="button" aria-label="Previous">&#10094;</button>
+    <button class="lightbox-nav lightbox-nav--next" id="lbNext" type="button" aria-label="Next">&#10095;</button>
+    <figure class="lightbox-figure">
+        <img id="lbImg" alt="">
+        <figcaption class="lightbox-caption">
+            <span id="lbName">—</span>
+            <span class="lightbox-caption-meta"><span id="lbSource">—</span> · <span id="lbMtime">—</span> · <span id="lbPos">—</span></span>
+        </figcaption>
+    </figure>
+</div>
+
+<!-- Per-customer Test Buy modal. Opened from cdTestBuyBtn; runs a full
+     daemon-driven checkout as the selected customer with the chosen card
+     and reports pass/fail + AI diagnosis. -->
+<div class="modal" id="testBuyModal" hidden role="dialog" aria-modal="true" aria-labelledby="tbModalTitle">
+    <div class="modal-card test-buy-card">
+        <div class="test-buy-head">
+            <h3 id="tbModalTitle">Test Buy</h3>
+            <p class="lede" id="tbCustomerLabel">—</p>
+        </div>
+
+        <div class="test-buy-section">
+            <label class="test-buy-label">Truck
+                <button type="button" id="tbReloadTrucks" class="btn btn-ghost btn-xs" title="Refresh from recent scans">↻</button>
+            </label>
+            <select id="tbTruckSelect" class="test-buy-input">
+                <option value="">Loading recent trucks…</option>
+            </select>
+            <input id="tbTruckUrl" type="url" class="test-buy-input"
+                   placeholder="Or paste any Good360 truck URL (e.g. https://www.good360.org/giving/…)">
+            <p class="test-buy-hint" id="tbTruckHint">Dropdown shows every truck the monitor has seen in the last 24 hours (available first, sold-out tagged). For products the monitor doesn't track, paste a Good360 truck URL above.</p>
+        </div>
+
+        <div class="test-buy-section">
+            <label class="test-buy-label">Card</label>
+            <div class="test-buy-radio-group" id="tbCardChoice">
+                <label class="test-buy-radio">
+                    <input type="radio" name="tb-card" value="sandbox" checked>
+                    <span class="test-buy-radio-body">
+                        <span class="test-buy-radio-title">Sandbox card</span>
+                        <span class="test-buy-radio-sub mono">4242 4242 4242 4242 · 12/30 · cvv 123 · no real charge</span>
+                    </span>
+                </label>
+                <label class="test-buy-radio">
+                    <input type="radio" name="tb-card" value="primary">
+                    <span class="test-buy-radio-body">
+                        <span class="test-buy-radio-title">Customer's primary card <span class="warn-pill">REAL CHARGE</span></span>
+                        <span class="test-buy-radio-sub mono" id="tbPrimaryLabel">—</span>
+                    </span>
+                </label>
+                <div id="tbFallbackCards"></div>
+            </div>
+        </div>
+
+        <div class="test-buy-warning">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            <span><strong>This places a real order on Good360.</strong> Sandbox card → Good360 will reject the card so no money moves but the truck IS reserved. Customer's card → real charge against the cardholder.</span>
+        </div>
+
+        <div class="test-buy-actions">
+            <button type="button" id="tbCancelBtn" class="btn btn-ghost" data-close>Cancel</button>
+            <button type="button" id="tbSubmitBtn" class="btn btn-primary">Run autobuy now</button>
+        </div>
+
+        <!-- Live result panel — replaces the form once a run starts. -->
+        <div class="test-buy-result" id="tbResult" hidden>
+            <div class="test-buy-result-status" id="tbResultStatus">
+                <span class="test-buy-spinner"></span>
+                <span id="tbResultText">Starting test purchase…</span>
+            </div>
+            <pre class="test-buy-result-detail mono" id="tbResultDetail"></pre>
+            <!-- AI diagnosis (lazy-fetched after a non-success outcome). -->
+            <div class="test-buy-diagnose" id="tbResultDiagnose" hidden>
+                <div class="diagnose-head">
+                    <span class="diagnose-label">AI diagnosis</span>
+                </div>
+                <div class="diagnose-body" id="tbResultDiagnoseBody"><em>Analyzing failure…</em></div>
+            </div>
+            <div class="test-buy-actions" style="margin-top:14px">
+                <button type="button" id="tbCloseAfter" class="btn btn-ghost">Close</button>
+                <button type="button" id="tbRunAgain" class="btn btn-primary" hidden>Run another</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="/static/admin.js?v=20260514-testbuy3"></script>
 </body>
 </html>

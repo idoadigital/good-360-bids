@@ -376,14 +376,22 @@ def fetch_status_live(customer_id: str) -> dict:
 
 def list_eligible_customers() -> list[dict]:
     """Customers that pass both the upstream `active` status and the local
-    in_rotation flag, with no active local cooldown. Round-robin uses this."""
+    in_rotation flag, with no active local cooldown. Round-robin uses this.
+
+    Order: operator's drag-and-drop position first when set; unranked rows
+    fall back to least-recently-used. Cooldown rows skip and re-enter at
+    their manual position once cleared (the WHERE clause excludes them now).
+    """
     with get_conn() as c:
         rows = c.execute(
             """SELECT * FROM customers
                 WHERE status = 'active'
                   AND in_rotation = 1
                   AND (cooldown_until IS NULL OR cooldown_until < datetime('now'))
-                ORDER BY COALESCE(last_used_at, '1970-01-01') ASC, id ASC"""
+                ORDER BY (manual_queue_position IS NULL),
+                         manual_queue_position ASC,
+                         COALESCE(last_used_at, '1970-01-01') ASC,
+                         id ASC"""
         ).fetchall()
     return [dict(r) for r in rows]
 

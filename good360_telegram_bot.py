@@ -139,18 +139,19 @@ def save_review_queue(queue):
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "🎛️ *E-Comsetter Mission Control*\n\n"
-        "*System Commands:*\n"
-        "/status — System health & last run\n"
-        "/logs — Last 60 monitoring runs\n"
-        "/test — Trigger immediate scan now\n"
-        "/pause — Pause auto-buy (alerts still fire)\n"
-        "/resume — Resume auto-buy\n"
-        "/help — Show this menu\n\n"
+        "📌 *E-Comsetter Mission Control — Command Menu*\n\n"
+        "Send any command below to control your Good360 monitor:\n\n"
+        "/status — 🟢 System health, last scan time, auto-buy status\n"
+        "/logs — 📋 Last 10 monitoring runs\n"
+        "/test — ⚡ Trigger an immediate scan RIGHT NOW\n"
+        "/pause — ⏸️ Pause all auto-buy (alerts still fire)\n"
+        "/resume — ▶️ Resume auto-buy\n"
+        "/help — 📖 Show this command menu\n\n"
         "*Intake Form Commands:*\n"
         "/pending — List pending intake forms\n"
         "/approve <REF> — Approve an intake form\n"
         "/reject <REF> — Reject an intake form\n"
+        "\n━━━━━━━━━━━━━━━━━━"
     )
     await update.message.reply_text(text, parse_mode='Markdown')
 
@@ -204,8 +205,8 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_chat.id):
         await update.message.reply_text("⛔ Unauthorized.")
         return
-    logs = get_recent_logs(60)
-    text = f"📋 *Last 60 Scans*\n`{logs}`"
+    logs = get_recent_logs(10)
+    text = f"📋 *Last 10 Scans*\n`{logs}`"
     await update.message.reply_text(text, parse_mode='Markdown')
 
 async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):

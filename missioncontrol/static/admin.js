@@ -29,6 +29,8 @@ const TAB_TITLES = {
     settings: 'Settings',
     testbuy: 'Test buy',
     'test-detail': 'Test run',
+    liveview: 'Live View',
+    'product-detail': 'Product',
     audit: 'Audit',
     import: 'Import CSV',
 };
@@ -39,16 +41,124 @@ const PARENT_TABS = {
     import: 'settings',
     'customer-detail': 'customers',
     'test-detail': 'testbuy',
+    'product-detail': 'scans',
 };
 
-$$('.tab').forEach(t => t.addEventListener('click', () => {
-    const name = t.dataset.tab;
+// View Transitions: when supported, wrapping the DOM mutation in
+// document.startViewTransition() makes the browser cross-fade the
+// outgoing and incoming panel using snapshots. Falls through to the
+// existing CSS fadeUp keyframe on browsers without the API.
+const _prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+// ---- Scroll-driven + cascade section reveal --------------------------
+// Top-level panel sections start hidden (CSS, gated on html.motion-ready)
+// and become visible when `.is-revealed` is added. The first time you
+// land on a panel, sections above the fold cascade in with a stagger;
+// anything below the fold is handed off to IntersectionObserver and
+// reveals as you scroll to it. Returning to the same panel skips the
+// cascade (already-revealed nodes keep their state) so re-navigation
+// doesn't feel busy.
+const REVEAL_SELECTOR = '.panel-header, .metric-strip, .surface-card';
+const _revealedPanels = new Set();
+
+const _scrollRevealObserver = ('IntersectionObserver' in window)
+    ? new IntersectionObserver((entries) => {
+        for (const e of entries) {
+            if (e.isIntersecting) {
+                e.target.classList.add('is-revealed');
+                _scrollRevealObserver.unobserve(e.target);
+            }
+        }
+      }, { threshold: 0.05, rootMargin: '0px 0px -8% 0px' })
+    : null;
+
+function _cascadeRevealPanel(panel) {
+    // Run after the browser has laid out the (possibly newly-active) panel
+    // so getBoundingClientRect returns accurate coordinates.
+    requestAnimationFrame(() => {
+        const targets = [...panel.querySelectorAll(REVEAL_SELECTOR)];
+        const vh = window.innerHeight;
+        let cascadeIdx = 0;
+        targets.forEach((el) => {
+            if (el.classList.contains('is-revealed')) return;
+            const rect = el.getBoundingClientRect();
+            const aboveFold = rect.top < vh * 0.92;
+            if (aboveFold) {
+                // Cap the stagger so content-heavy panels don't drag on.
+                const delay = Math.min(cascadeIdx++, 6) * 70;
+                setTimeout(() => el.classList.add('is-revealed'), delay);
+            } else if (_scrollRevealObserver) {
+                _scrollRevealObserver.observe(el);
+            } else {
+                el.classList.add('is-revealed');
+            }
+        });
+    });
+}
+
+function revealActivePanelSections(opts = {}) {
+    const panel = document.querySelector('.panel.active');
+    if (!panel) return;
+    const name = panel.dataset.panel;
+    const forceCascade = !!opts.forceCascade;
+    if (forceCascade || !_revealedPanels.has(name)) {
+        _revealedPanels.add(name);
+        _cascadeRevealPanel(panel);
+    } else {
+        // Repeat visit: surface everything immediately (no cascade, but
+        // also re-attach the scroll observer to anything still pending).
+        panel.querySelectorAll(REVEAL_SELECTOR).forEach(el => {
+            if (!el.classList.contains('is-revealed')) {
+                el.classList.add('is-revealed');
+            }
+        });
+    }
+}
+
+function _runTabSwitch(name) {
     const parent = PARENT_TABS[name] || name;
     // Active state is a sidebar concept; only mutate sidebar items.
     $$('.nav-item').forEach(x => x.classList.toggle('active', x.dataset.tab === parent));
     $$('.panel').forEach(p => p.classList.toggle('active', p.dataset.panel === name));
     $('#crumbCurrent').textContent = TAB_TITLES[name] || name;
     loaders[name] && loaders[name]();
+}
+
+// Programmatic navigation helper for code paths that activate a panel
+// outside the sidebar tab-click flow (customer-detail, test-detail,
+// product-detail, the back-button from product-detail). Critical to call
+// `revealActivePanelSections()` here: without it the panel becomes
+// `.active` but its `.surface-card` children stay at opacity:0 forever
+// (the motion-ready reveal pre-state) and the page looks empty.
+function activatePanelDirect(name, crumb) {
+    const parent = PARENT_TABS[name] || name;
+    $$('.nav-item').forEach(x => x.classList.toggle('active', x.dataset.tab === parent));
+    $$('.panel').forEach(p => p.classList.toggle('active', p.dataset.panel === name));
+    $('#crumbCurrent').textContent = crumb || TAB_TITLES[name] || name;
+    revealActivePanelSections({ forceCascade: true });
+}
+
+function switchTab(name) {
+    if (document.startViewTransition && !_prefersReducedMotion.matches) {
+        const t = document.startViewTransition(() => _runTabSwitch(name));
+        // Run the section cascade once the cross-fade has actually finished
+        // so the stagger plays on the live DOM, not under a snapshot.
+        t.finished.then(() => revealActivePanelSections()).catch(() => {});
+    } else {
+        _runTabSwitch(name);
+        revealActivePanelSections();
+    }
+}
+
+$$('.tab').forEach(t => t.addEventListener('click', (e) => {
+    switchTab(t.dataset.tab);
+    // Drop focus on pointer clicks so the sidebar's :focus-within rule
+    // releases and the rail collapses back to its 72px resting width.
+    // Keyboard activations (Enter/Space, detail === 0) keep focus so
+    // keyboard users don't lose their place in the nav.
+    if (e.detail !== 0 && typeof e.currentTarget.blur === 'function') {
+        e.currentTarget.blur();
+    }
 }));
 
 // ---------------- Boot ----------------
@@ -75,6 +185,9 @@ $$('.tab').forEach(t => t.addEventListener('click', () => {
     // Cheap re-check so a toggle from another tab/operator updates the banner
     // even on long-lived dashboard sessions.
     setInterval(refreshSandboxBanner, 60_000);
+
+    // Kick off the initial section cascade on the default active panel.
+    revealActivePanelSections({ forceCascade: true });
 })();
 
 // ---------------- Sandbox banner ----------------
@@ -123,12 +236,59 @@ async function loadSystemStatus() {
     }
 }
 
+// ---------------- Restart system button ----------------
+
+$('#restartBtn').addEventListener('click', async () => {
+    const ok = window.confirm(
+        'Restart all services?\n\n' +
+        'Scanner services (monitor, daemon, watchdog, telegram-bot, intake) ' +
+        'cycle first, then this dashboard restarts itself. ' +
+        'The page will be unreachable for ~10 seconds.'
+    );
+    if (!ok) return;
+
+    const btn = $('#restartBtn');
+    const label = $('#restartBtnLabel');
+    btn.disabled = true;
+    label.textContent = 'Restarting…';
+    $('#systemDot').className = 'dot warn';
+    $('#systemText').textContent = 'restarting…';
+
+    try {
+        const r = await api('/api/admin/restart', {method: 'POST', body: '{}'}).then(r => r.json());
+        if (!r.ok) throw new Error(r.reason || 'restart failed');
+    } catch (err) {
+        // The self-restart kills this response mid-flight by design, which
+        // throws here. That's expected — start polling for the dashboard
+        // to come back up.
+        console.warn('restart POST ended (expected if self-restart fired):', err);
+    }
+
+    // Poll until /api/status responds healthy again, then reload so badges
+    // and scan tables re-fetch against the fresh backend.
+    const started = Date.now();
+    const POLL_TIMEOUT_MS = 90_000;
+    const tick = async () => {
+        try {
+            const s = await fetch('/api/status', {credentials: 'same-origin'}).then(r => r.json());
+            if (s?.system?.status === 'healthy') { window.location.reload(); return; }
+        } catch { /* still down — keep polling */ }
+        if (Date.now() - started > POLL_TIMEOUT_MS) {
+            label.textContent = 'Restart timed out';
+            btn.disabled = false;
+            return;
+        }
+        setTimeout(tick, 2000);
+    };
+    setTimeout(tick, 4000);
+});
+
 // ---------------- Sidebar badges ----------------
 
 async function loadSidebarBadges() {
     try {
-        const s = await api('/api/admin/scans?limit=1000').then(r => r.json());
-        $('#scansBadge').textContent = (s.data?.scans || []).length;
+        const s = await api('/api/admin/scans?count_only=1').then(r => r.json());
+        $('#scansBadge').textContent = s.data?.count ?? 0;
     } catch {}
     try {
         const p = await api('/api/admin/purchases?limit=1000').then(r => r.json());
@@ -174,12 +334,15 @@ function filteredChecks() {
 }
 
 async function loadScans() {
-    // Pull scan summary, log tail, roster queue, and login telemetry in parallel.
+    // Pull scan summary, log tail, roster queue, login telemetry, and the
+    // per-scan screenshot buckets in parallel.
     const [r1, r2, r3, r4] = await Promise.all([
-        api('/api/admin/scans?limit=200').then(r => r.json()),
+        api('/api/admin/scans?limit=200&slim=1').then(r => r.json()),
         api('/api/admin/scans/log-tail?n=200').then(r => r.json()).catch(() => ({data: {lines: []}})),
         api('/api/admin/roster/queue').then(r => r.json()).catch(() => ({data: {}})),
         api('/api/admin/login-attempts?limit=10').then(r => r.json()).catch(() => ({data: [], summary: {}})),
+        fetchScanShotBuckets(),
+        fetchScanCaptureBuckets(),
     ]);
     renderRoster(r3.data || {});
     renderLoginHealth(r4.data || [], r4.summary || {});
@@ -202,10 +365,19 @@ async function loadScans() {
         if (hbIso !== SCAN_STATE.lastHbIso) {
             const prev = SCAN_STATE.lastHbIso;
             if (prev) {
-                const delta = Math.max(15, secondsSince(prev) - secondsSince(hbIso));
-                // EWMA so we converge on a stable interval rather than chase noise.
+                // Clamp the observed gap to [15s, 120s]. A monitor restart
+                // leaves a 5-minute gap between the last pre-restart
+                // heartbeat and the first post-restart one — that lone
+                // sample used to poison the EWMA up to "next check in 300s"
+                // even though normal cadence is 30. Hard cap prevents
+                // restart events from leaking into the inference.
+                const rawDelta = secondsSince(prev) - secondsSince(hbIso);
+                const delta = Math.max(15, Math.min(120, rawDelta));
+                // Higher learning rate (0.6 weight on new sample) so the
+                // EWMA recovers in 2–3 scans after any outlier instead of
+                // dozens.
                 SCAN_STATE.intervalSec = SCAN_STATE.intervalSec
-                    ? Math.round(SCAN_STATE.intervalSec * 0.6 + delta * 0.4)
+                    ? Math.round(SCAN_STATE.intervalSec * 0.4 + delta * 0.6)
                     : delta;
             }
             SCAN_STATE.lastHbIso = hbIso;
@@ -281,6 +453,11 @@ async function loadScans() {
         SCAN_STATE.scansPage = 0;
     }
     renderScansTable();
+
+    // Products refresh on its own slower cadence (see PRODUCTS_REFRESH_MS).
+    // Skipping it here keeps the 5-second scan refresh from flashing
+    // the products table to "Loading…" every tick.
+    maybeRefreshProducts();
 }
 
 // ---------------- Grouping log lines into per-check events ----------------
@@ -547,6 +724,8 @@ function renderScansTable() {
         const dt = document.createElement('tr');
         dt.className = 'scan-detail' + (expanded ? ' shown' : '');
         dt.dataset.scanKey = key;
+        const shotStrip = renderScanShotStrip(key);
+        const captureStrip = renderScanCaptureStrip(key);
         dt.innerHTML = `<td colspan="6"><dl class="scan-detail__grid">
             <dt>captured</dt><dd>${escape(s.time || '—')}</dd>
             <dt>org</dt><dd>${escape(s.org_id || '—')}</dd>
@@ -555,8 +734,15 @@ function renderScansTable() {
             <dt>login</dt><dd>${s.login_ok === true ? 'ok' : s.login_ok === false ? 'fail' : 'unknown'}</dd>
             <dt>price</dt><dd>${s.price != null ? '$' + Number(s.price).toLocaleString() : '—'}</dd>
             <dt>url</dt><dd>${s.url ? `<a href="${escape(s.url)}" target="_blank" rel="noopener">${escape(s.url)}</a>` : '—'}</dd>
-        </dl></td>`;
+        </dl>${captureStrip}${shotStrip}</td>`;
         tb.appendChild(dt);
+
+        dt.querySelectorAll('.shot-card').forEach(card => {
+            card.addEventListener('click', (e) => {
+                e.stopPropagation();
+                openScanShot(card.dataset.scanKey, Number(card.dataset.shotIdx));
+            });
+        });
 
         tr.addEventListener('click', () => {
             const k = tr.dataset.scanKey;
@@ -565,6 +751,18 @@ function renderScansTable() {
             tr.classList.toggle('expanded');
             dt.classList.toggle('shown');
         });
+
+        // Small badge on the main row when this scan has screenshots — gives
+        // users a visible signal without needing to expand every row.
+        const shotCount = shotsForScan(key).length;
+        if (shotCount) {
+            const truckCell = tr.querySelector('[data-label="Truck"]');
+            const badge = document.createElement('span');
+            badge.className = 'scan-shot-badge';
+            badge.title = `${shotCount} screenshot${shotCount === 1 ? '' : 's'}`;
+            badge.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="14" rx="2"/><circle cx="12" cy="13" r="3"/><path d="M9 6l1.5-2h3L15 6"/></svg><span>${shotCount}</span>`;
+            truckCell.appendChild(badge);
+        }
     }
 
     const pager = $('#scansPager');
@@ -679,37 +877,445 @@ setTimeout(startScanAutoRefresh, 1000);
 
 // ---------------- Purchases ----------------
 
+// Track which purchase rows are expanded across refreshes.
+const PURCHASE_EXPANDED = new Set();
+
+const PURCH_STATE = {
+    q: '', since: '', until: '',
+    offset: 0, perPage: 25,
+    total: 0,
+    _debounceTimer: null,
+};
+
+function _purchasesParams() {
+    const p = new URLSearchParams({
+        limit:  String(PURCH_STATE.perPage),
+        offset: String(PURCH_STATE.offset),
+        days:   '365',   // wide net by default; date filters refine within
+    });
+    if (PURCH_STATE.q)     p.set('q', PURCH_STATE.q);
+    if (PURCH_STATE.since) p.set('since', PURCH_STATE.since);
+    if (PURCH_STATE.until) p.set('until', PURCH_STATE.until);
+    return p.toString();
+}
+
 async function loadPurchases() {
-    const r = await api('/api/admin/purchases?limit=500').then(r => r.json());
+    const r = await api('/api/admin/purchases?' + _purchasesParams()).then(r => r.json());
     const purchases = r.data || [];
+    const stats = r.stats || {};
+    PURCH_STATE.total = Number(r.total || 0);
 
-    const successes = purchases.filter(p => isSuccess(p));
-    const failures  = purchases.filter(p => isFail(p));
-    const total = successes.reduce((acc, p) => acc + (Number(p.total) || 0), 0);
+    $('#purchOk').textContent    = stats.ok ?? 0;
+    $('#purchFail').textContent  = stats.fail ?? 0;
+    $('#purchTotal').textContent = '$' + Number(stats.spend || 0).toLocaleString(undefined, {maximumFractionDigits: 2});
 
-    $('#purchOk').textContent = successes.length;
-    $('#purchFail').textContent = failures.length;
-    $('#purchTotal').textContent = '$' + total.toLocaleString(undefined, {maximumFractionDigits: 2});
+    const meta = $('#purchSummaryMeta');
+    if (meta) {
+        const start = PURCH_STATE.offset + (purchases.length ? 1 : 0);
+        const end   = PURCH_STATE.offset + purchases.length;
+        meta.textContent = PURCH_STATE.total
+            ? `showing ${start}–${end} of ${PURCH_STATE.total}`
+            : 'no matching attempts';
+    }
 
     const tb = $('#purchasesTable tbody');
     tb.innerHTML = '';
     if (!purchases.length) {
-        tb.innerHTML = `<tr><td colspan="6"><div class="empty-state">No purchase attempts logged yet.</div></td></tr>`;
+        tb.innerHTML = `<tr><td colspan="8"><div class="empty-state">No purchase attempts match the current filters.</div></td></tr>`;
+        _renderPurchPager();
         return;
     }
+    const isSuper = CURRENT_USER && CURRENT_USER.role === 'super_admin';
     for (const p of purchases) {
         const status = displayStatus(p);
+        const key = `${p.ts || ''}|${p.truck || ''}|${p.attempt_id || p.id || ''}`;
+        const expanded = PURCHASE_EXPANDED.has(key);
+
+        // The Detail cell was rendering raw error blobs / JSON tracebacks
+        // unreadable on a single line. Now it's a one-line summary; the
+        // full picture lives in the expanded panel below.
+        const summary = _purchaseSummary(p);
+        const delId = p.attempt_id != null ? p.attempt_id : (p.id != null ? p.id : '');
+
         const tr = document.createElement('tr');
+        tr.className = 'purchase-row' + (expanded ? ' expanded' : '');
+        tr.dataset.key = key;
         tr.innerHTML = `
+            <td class="expand-cell">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+            </td>
             <td class="mono" data-label="Time" title="${escape(p.ts || '')}">${escape(p.ts ? formatHumanTime(p.ts) : '—')}</td>
             <td data-label="Org">${escape(p.org_id || '—')}</td>
             <td data-label="Truck">${escape(p.truck || '—')}</td>
             <td class="num" data-label="Total">${p.total != null ? '$' + Number(p.total).toFixed(2) : '—'}</td>
             <td data-label="Status"><span class="pill ${pillClass(status)}">${escape(status.toLowerCase())}</span></td>
-            <td class="mono" data-label="Detail">${escape(p.detail || p.error || p.confirmation_number || '—')}</td>
+            <td class="mono" data-label="Detail" style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escape(summary)}</td>
+            <td class="super-only" data-hidden="${isSuper ? 'false' : 'true'}">
+                ${delId !== '' ? `<button type="button" class="row-delete-btn" title="Delete this attempt" data-del-source="${escape(p.source || 'roster')}" data-del-id="${escape(String(delId))}">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+                </button>` : ''}
+            </td>
         `;
         tb.appendChild(tr);
+
+        const dt = document.createElement('tr');
+        dt.className = 'purchase-detail' + (expanded ? ' shown' : '');
+        dt.innerHTML = `<td colspan="8">${_purchaseDetailBody(p)}</td>`;
+        tb.appendChild(dt);
+
+        tr.addEventListener('click', (e) => {
+            // Don't expand when the delete button (or anything inside it) is clicked.
+            if (e.target.closest('.row-delete-btn')) return;
+            if (PURCHASE_EXPANDED.has(key)) PURCHASE_EXPANDED.delete(key);
+            else                            PURCHASE_EXPANDED.add(key);
+            tr.classList.toggle('expanded');
+            dt.classList.toggle('shown');
+            if (dt.classList.contains('shown')) {
+                // Lazy-load the capture JSON the first time this row opens.
+                if (p.capture_path) {
+                    const slot = dt.querySelector('[data-capture-slot]');
+                    if (slot && !slot.dataset.loaded) {
+                        slot.dataset.loaded = '1';
+                        _renderCaptureInline(slot, p.capture_path);
+                    }
+                }
+                // Lazy-load the AI diagnosis. The endpoint caches per
+                // attempt, so a hot row just re-renders the stored answer.
+                const dslot = dt.querySelector('[data-diagnose-slot]');
+                if (dslot && !dslot.dataset.loaded) {
+                    dslot.dataset.loaded = '1';
+                    _renderDiagnoseInline(dslot);
+                }
+            }
+        });
+
+        const delBtn = tr.querySelector('.row-delete-btn');
+        if (delBtn) delBtn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (!window.confirm(`Delete this purchase attempt?\n\n${p.org_id || '—'} — ${p.truck || '—'}\n${p.ts || ''}\n\nThis cannot be undone.`)) return;
+            delBtn.disabled = true;
+            try {
+                const res = await api(`/api/admin/purchases/${delBtn.dataset.delSource}/${encodeURIComponent(delBtn.dataset.delId)}`, {method: 'DELETE'}).then(r => r.json());
+                if (!res.success) throw new Error(res.error || 'delete failed');
+                loadPurchases();
+                loadSidebarBadges();
+            } catch (err) {
+                delBtn.disabled = false;
+                window.alert('Delete failed: ' + (err.message || err));
+            }
+        });
     }
+
+    _renderPurchPager();
+}
+
+function _renderPurchPager() {
+    const pager = $('#purchPager');
+    if (!pager) return;
+    const pages = Math.max(1, Math.ceil(PURCH_STATE.total / PURCH_STATE.perPage));
+    const currentPage = Math.floor(PURCH_STATE.offset / PURCH_STATE.perPage);
+    pager.hidden = pages <= 1;
+    $('#purchPagerInfo').textContent = `${currentPage + 1} / ${pages}`;
+    pager.querySelector('[data-pg="prev"]').disabled = currentPage === 0;
+    pager.querySelector('[data-pg="next"]').disabled = (PURCH_STATE.offset + PURCH_STATE.perPage) >= PURCH_STATE.total;
+}
+
+// ---- Purchases toolbar wiring ---------------------------------------
+function _purchaseFiltersChanged({ resetOffset = true } = {}) {
+    if (resetOffset) PURCH_STATE.offset = 0;
+    clearTimeout(PURCH_STATE._debounceTimer);
+    PURCH_STATE._debounceTimer = setTimeout(() => loadPurchases().catch(e => console.error('[purchases]', e)), 200);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const search = $('#purchSearch');
+    const since  = $('#purchSince');
+    const until  = $('#purchUntil');
+    const reset  = $('#purchReset');
+    if (search) search.addEventListener('input', () => { PURCH_STATE.q = search.value.trim(); _purchaseFiltersChanged(); });
+    if (since)  since.addEventListener('change', () => { PURCH_STATE.since = since.value; _purchaseFiltersChanged(); });
+    if (until)  until.addEventListener('change', () => { PURCH_STATE.until = until.value; _purchaseFiltersChanged(); });
+    if (reset)  reset.addEventListener('click', () => {
+        PURCH_STATE.q = ''; PURCH_STATE.since = ''; PURCH_STATE.until = '';
+        if (search) search.value = '';
+        if (since)  since.value  = '';
+        if (until)  until.value  = '';
+        _purchaseFiltersChanged();
+    });
+    document.querySelectorAll('#purchPager .pager-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const dir = btn.dataset.pg === 'next' ? 1 : -1;
+            PURCH_STATE.offset = Math.max(0, PURCH_STATE.offset + dir * PURCH_STATE.perPage);
+            loadPurchases().catch(e => console.error('[purchases]', e));
+        });
+    });
+});
+
+async function _renderDiagnoseInline(slot, { refresh = false } = {}) {
+    const source = slot.dataset.diagSource;
+    const id     = slot.dataset.diagId;
+    const body   = slot.querySelector('.diagnose-body');
+    const btn    = slot.querySelector('.diagnose-refresh');
+    if (!source || !id || !body) return;
+
+    body.innerHTML = `<span class="diagnose-loading">Analyzing failure…</span>`;
+    if (btn) btn.hidden = true;
+
+    const url = `/api/admin/purchases/${encodeURIComponent(source)}/${encodeURIComponent(id)}/diagnose${refresh ? '?refresh=1' : ''}`;
+    let payload;
+    try {
+        const r = await api(url);
+        payload = await r.json();
+    } catch (e) {
+        body.innerHTML = `<span class="diagnose-error">Could not run diagnosis: ${escape(String(e))}</span>`;
+        if (btn) btn.hidden = false;
+        return;
+    }
+
+    if (!payload?.success) {
+        body.innerHTML = `<span class="diagnose-error">${escape(payload?.error || 'diagnosis failed')}</span>`;
+        if (btn) btn.hidden = false;
+        return;
+    }
+
+    const d        = payload.data || {};
+    const cached   = !!payload.cached;
+    const action   = d.suggested_action ? `<div class="diagnose-action"><span class="diagnose-action-label">Next step</span> ${escape(d.suggested_action)}</div>` : '';
+    const sources  = d.similar_count
+        ? `<span class="diagnose-meta">${d.similar_count} similar past failure${d.similar_count === 1 ? '' : 's'} considered</span>`
+        : `<span class="diagnose-meta">no prior similar failures</span>`;
+    const generated = d.generated_at ? ` · cached ${escape(formatHumanTime(d.generated_at))}` : '';
+    const modelTag  = d.model ? `<span class="diagnose-model mono">${escape(d.model)}</span>` : '';
+    body.innerHTML = `
+        <p class="diagnose-text">${escape(d.diagnosis || '')}</p>
+        ${action}
+        <div class="diagnose-footer">${sources}${cached ? generated : ''} ${modelTag}</div>
+    `;
+    if (btn) {
+        btn.hidden = false;
+        btn.onclick = (e) => { e.stopPropagation(); _renderDiagnoseInline(slot, { refresh: true }); };
+    }
+}
+
+
+async function _renderCaptureInline(slot, capturePath) {
+    slot.innerHTML = '<div class="empty-state" style="padding:12px">Loading capture…</div>';
+    let data;
+    try {
+        const url = '/api/admin/scans/captures/file?p=' + encodeURIComponent(capturePath);
+        data = await api(url).then(r => r.json());
+    } catch (e) {
+        slot.innerHTML = `<div class="empty-state" style="padding:12px;color:var(--err)">Failed to load capture JSON: ${escape(String(e))}</div>`;
+        return;
+    }
+
+    // Build a structured summary so the operator doesn't have to scroll
+    // through 700KB of network log to find what went wrong.
+    const network = data.network || [];
+    const console_ = data.console || [];
+    const steps    = data.steps   || [];
+
+    const statusCounts = {};
+    for (const n of network) {
+        const s = n.status || 0;
+        statusCounts[s] = (statusCounts[s] || 0) + 1;
+    }
+    const statusStr = Object.entries(statusCounts)
+        .sort((a, b) => a[0] - b[0])
+        .map(([s, c]) => `${s}: ${c}`)
+        .join(' · ');
+
+    const non200 = network.filter(n => (n.status || 0) >= 400);
+    const consoleErrs = console_.filter(c => c.type === 'error' || c.type === 'pageerror');
+
+    // Summary blocks
+    const summaryHtml = `
+        <div class="capture-summary">
+            <div class="capture-summary-row">
+                <span class="capture-label">Outcome</span>
+                <span class="pill ${pillClass(data.outcome)}">${escape(data.outcome || '?')}</span>
+                <span class="mono" style="color:var(--text-dim)">${escape(data.message || '')}</span>
+            </div>
+            <div class="capture-summary-row">
+                <span class="capture-label">Engine</span>
+                <span class="mono">${escape(data.engine || '(script)')}</span>
+                <span class="capture-label">Mode</span>
+                <span class="mono">${data.sandbox_mode ? 'sandbox' : 'live'}</span>
+            </div>
+            <div class="capture-summary-row">
+                <span class="capture-label">Final URL</span>
+                ${data.final_url
+                    ? `<a class="mono" href="${escape(data.final_url)}" target="_blank" rel="noopener" style="word-break:break-all">${escape(data.final_url)}</a>`
+                    : '<span class="mono" style="color:var(--text-mute)">—</span>'}
+            </div>
+            <div class="capture-summary-row">
+                <span class="capture-label">Timing</span>
+                <span class="mono">${escape(data.started_at || '—')} → ${escape(data.finished_at || '—')}</span>
+            </div>
+            <div class="capture-summary-row">
+                <span class="capture-label">Counts</span>
+                <span class="mono">${steps.length} steps · ${network.length} responses (${statusStr}) · ${console_.length} console msgs (${consoleErrs.length} errors)</span>
+            </div>
+        </div>
+    `;
+
+    // Steps timeline
+    const stepsHtml = steps.length
+        ? `<details class="capture-section">
+            <summary>Steps timeline (${steps.length})</summary>
+            <pre class="purchase-detail__pre">${steps.map(s =>
+                `[${escape(s.ts || '')}] ${escape(s.label || '')}` +
+                (Object.keys(s).filter(k => k !== 'ts' && k !== 'label').length
+                    ? ' ' + escape(JSON.stringify(Object.fromEntries(Object.entries(s).filter(([k]) => k !== 'ts' && k !== 'label'))))
+                    : '')
+            ).join('\n')}</pre>
+        </details>`
+        : '';
+
+    // 4xx/5xx responses (most actionable)
+    const errResponsesHtml = non200.length
+        ? `<details class="capture-section" open>
+            <summary>Non-200 responses (${non200.length})</summary>
+            <pre class="purchase-detail__pre">${non200.map(n =>
+                `HTTP ${n.status} ${n.method || ''} ${n.url}\n  content-type: ${n.content_type || ''}\n  body: ${escape((n.body || '').slice(0, 600))}`
+            ).join('\n\n')}</pre>
+        </details>`
+        : '';
+
+    // Console errors
+    const consoleHtml = consoleErrs.length
+        ? `<details class="capture-section" open>
+            <summary>Console errors (${consoleErrs.length})</summary>
+            <pre class="purchase-detail__pre">${consoleErrs.map(c =>
+                `[${escape(c.ts || '')}] [${escape(c.type)}] ${escape(c.text || '')}`
+            ).join('\n')}</pre>
+        </details>`
+        : '';
+
+    // Final HTML preview if present
+    const finalHtmlBlock = data.final_html
+        ? `<details class="capture-section">
+            <summary>Final page HTML (${data.final_html.length} chars)</summary>
+            <pre class="purchase-detail__pre">${escape(data.final_html.slice(0, 8000))}${data.final_html.length > 8000 ? '\n…[truncated]' : ''}</pre>
+        </details>`
+        : '';
+
+    // Full raw network log (collapsed by default - it's big)
+    const networkHtml = network.length
+        ? `<details class="capture-section">
+            <summary>All network responses (${network.length}, including 200s)</summary>
+            <pre class="purchase-detail__pre">${network.map(n =>
+                `HTTP ${n.status} ${n.method || ''} ${n.url}${n.size ? ' [' + n.size + 'B]' : ''}`
+            ).join('\n')}</pre>
+        </details>`
+        : '';
+
+    // Raw JSON dump (collapsed)
+    const rawJsonHtml = `<details class="capture-section">
+        <summary>Raw capture JSON (${JSON.stringify(data).length.toLocaleString()} chars)</summary>
+        <pre class="purchase-detail__pre">${escape(JSON.stringify(data, null, 2))}</pre>
+    </details>`;
+
+    slot.innerHTML = `
+        ${summaryHtml}
+        ${stepsHtml}
+        ${errResponsesHtml}
+        ${consoleHtml}
+        ${finalHtmlBlock}
+        ${networkHtml}
+        ${rawJsonHtml}
+    `;
+}
+
+function _purchaseSummary(p) {
+    // Pick the most useful one-liner. SUCCESS → confirmation #; FAILED →
+    // first line of the error; otherwise short status note.
+    if (p.confirmation_number) return `Order #${p.confirmation_number}`;
+    const err = p.error_message || p.error || p.detail || '';
+    if (err) {
+        const firstLine = String(err).split('\n')[0].slice(0, 240);
+        return firstLine;
+    }
+    return '—';
+}
+
+function _purchaseDetailBody(p) {
+    // Pretty-print every meaningful field with click-through links for the
+    // capture JSON + screenshots so an operator can drill in without
+    // copy-pasting paths.
+    const rows = [];
+    const push = (label, value) => {
+        if (value === null || value === undefined || value === '') return;
+        rows.push([label, value]);
+    };
+    push('Source',          p.source || 'legacy');
+    push('Engine',          p.engine);
+    push('Status',          p.status);
+    push('Mode',            p.mode);
+    push('Started',         p.started_at);
+    push('Completed',       p.completed_at);
+    push('Elapsed',         p.elapsed_seconds != null ? `${Number(p.elapsed_seconds).toFixed(1)}s` : null);
+    push('Org',             p.org_name || p.org_id);
+    push('Customer',        p.customer_name);
+    push('Customer ID',     p.customer_id || p.quickbeed_customer_id);
+    push('Truck',           p.truck_name || p.truck || p.truck_title);
+    push('Truck URL',       p.truck_url
+        ? `<a class="mono" href="${escape(p.truck_url)}" target="_blank" rel="noopener" style="word-break:break-all">${escape(p.truck_url)}</a>`
+        : null);
+    push('Truck price',     p.truck_price != null ? `$${Number(p.truck_price).toLocaleString()}` : null);
+    push('Order total',     p.order_total != null ? `$${Number(p.order_total).toLocaleString()}` : null);
+    push('Confirmation #',  p.confirmation_number);
+    push('Capture JSON',    p.capture_path
+        ? `<a class="mono" target="_blank" rel="noopener" href="/api/admin/scans/captures/file?p=${encodeURIComponent(p.capture_path)}">view raw capture (network log, console errors, final HTML) ↗</a>`
+        : null);
+    push('Screenshot',      p.screenshot_path
+        ? `<a class="mono" target="_blank" rel="noopener" href="/api/admin/screenshots/file?p=${encodeURIComponent(p.screenshot_path)}">view screenshot ↗</a>`
+        : null);
+
+    // Error: shown as a separate, full-width block — these can be long
+    // multi-line tracebacks and squishing them into the table is what
+    // made the Detail column unreadable to begin with.
+    const errorBlock = (p.error_message || p.error)
+        ? `<div class="purchase-detail__error">
+             <div class="product-detail__label">Error</div>
+             <pre class="purchase-detail__pre">${escape(p.error_message || p.error)}</pre>
+           </div>`
+        : '';
+
+    const rowHtml = rows.map(([label, value]) =>
+        `<dt>${escape(label)}</dt><dd>${value}</dd>`
+    ).join('');
+
+    // Slot for the AI-generated diagnosis (lazy-loaded on first expand).
+    // Top of the panel so the operator sees the explanation before the
+    // raw data. Only shown for attempts that have an id we can route to.
+    const delId = p.attempt_id != null ? p.attempt_id : (p.id != null ? p.id : '');
+    const diagnoseSlot = delId !== ''
+        ? `<div class="purchase-detail__diagnose" data-diagnose-slot
+                 data-diag-source="${escape(p.source || 'roster')}"
+                 data-diag-id="${escape(String(delId))}">
+             <div class="diagnose-head">
+                 <span class="diagnose-label">AI diagnosis</span>
+                 <button type="button" class="diagnose-refresh" title="Re-run the diagnosis (bypass cache)" hidden>↻</button>
+             </div>
+             <div class="diagnose-body"><em>—</em></div>
+           </div>`
+        : '';
+
+    // Slot for the full capture JSON (lazy-loaded on row expand).
+    const captureSlot = p.capture_path
+        ? `<div class="purchase-detail__capture">
+             <div class="product-detail__label">Capture (network, console, page state)</div>
+             <div data-capture-slot></div>
+           </div>`
+        : '';
+
+    return `<div class="purchase-detail__body">
+        ${diagnoseSlot}
+        <dl class="scan-detail__grid">${rowHtml}</dl>
+        ${errorBlock}
+        ${captureSlot}
+    </div>`;
 }
 
 function isSuccess(p) {
@@ -1095,20 +1701,26 @@ function openCustomerDetail(id) {
     _currentCustomerId = id;
     // Programmatically activate the customer-detail panel (no nav-item exists
     // for it; PARENT_TABS keeps "Customers" highlighted in the sidebar).
-    $$('.nav-item').forEach(x => x.classList.toggle('active', x.dataset.tab === 'customers'));
-    $$('.panel').forEach(p => p.classList.toggle('active', p.dataset.panel === 'customer-detail'));
-    $('#crumbCurrent').textContent = TAB_TITLES['customer-detail'];
+    activatePanelDirect('customer-detail');
     loadCustomerDetail(id);
 }
 
+// Per-customer credential cache so toggling the eye on/off doesn't re-hit
+// the QuickBeed API (and re-audit) on every click. Cleared whenever we
+// open a different customer's detail page.
+const _credCache = {};
+
 async function loadCustomerDetail(id) {
-    // Reset the masked sections in case we navigate from another customer.
-    $('#cdCreds').innerHTML = `
-        <dt>username</dt><dd class="mono"><em style="color:var(--text-mute)">hidden — click "Show full record"</em></dd>
-        <dt>password</dt><dd class="mono"><em style="color:var(--text-mute)">hidden</em></dd>`;
+    // Reset cred state on customer change. The card+ack sections stay
+    // behind the "Show full record" button; the cred section now has
+    // its own eye toggle per field so the values stay masked until
+    // explicitly revealed.
+    Object.keys(_credCache).forEach(k => delete _credCache[k]);
+    _resetCredRow('username');
+    _resetCredRow('password');
     $('#cdCards').innerHTML = `<em style="color:var(--text-mute)">hidden — click "Show full record"</em>`;
     $('#cdAcks').innerHTML = `<dt><em style="color:var(--text-mute)">live fetch only</em></dt><dd></dd>`;
-    $('#cdCredsSub').textContent = 'click "Show full record" to reveal';
+    $('#cdCredsSub').textContent = 'click the eye to reveal — every reveal is audit-logged';
     $('#cdCardsSub').textContent = 'card numbers and CVVs are masked even after reveal';
 
     // Reset to the Profile tab whenever a different customer is opened.
@@ -1173,6 +1785,20 @@ async function loadCustomerDetail(id) {
         ['Priority', c.priority_level],
         ['Max budget', c.max_budget != null ? '$' + Number(c.max_budget).toLocaleString() : null],
     ]);
+
+    // Rotation & sync state — every remaining db column so operators can
+    // validate the local mirror matches QuickBeed and see the queue
+    // position the round-robin will pick.
+    renderKV('#cdRotation', [
+        ['In rotation',          boolPretty(c.in_rotation)],
+        ['Manual queue position', c.manual_queue_position != null ? String(c.manual_queue_position) : null],
+        ['Status reason',        c.status_reason],
+        ['Last used at',         c.last_used_at, 'mono'],
+        ['Last purchase at',     c.last_purchase_at, 'mono'],
+        ['Cooldown until',       c.cooldown_until, 'mono'],
+        ['Last synced at',       c.last_synced_at, 'mono'],
+        ['Last etag',            c.last_etag, 'mono'],
+    ]);
 }
 
 async function revealFullRecord() {
@@ -1187,13 +1813,12 @@ async function revealFullRecord() {
             return;
         }
         const d = r.data;
-        const pc = d.partner_credentials || {};
-        $('#cdCredsSub').innerHTML = `live (audit-logged · reason=<code class="mono">${escape(d._reason_logged)}</code>)`;
-        $('#cdCreds').innerHTML = `
-            <dt>username</dt><dd class="mono">${escape(pc.username || '—')}</dd>
-            <dt>password</dt><dd class="mono">${pc.password_present
-                ? `<span style="color:var(--text-mute)">${'•'.repeat(pc.password_length || 0)}</span> <span style="color:var(--text-mute);font-size:11px">(${pc.password_length} chars)</span>`
-                : '<em style="color:var(--text-mute)">not set</em>'}</dd>`;
+        // The cred section now lives on its own eye-toggle endpoint —
+        // revealFullRecord no longer touches it. If the operator wants
+        // to see the username/password, they click the eye button which
+        // hits /credentials directly (separate audit entry, finer-grained).
+        // Reveal-record handles the larger payload (cards + acks).
+        $('#cdCardsSub').innerHTML = `live (audit-logged · reason=<code class="mono">${escape(d._reason_logged)}</code>)`;
 
         const cards = d.payment_methods || [];
         if (!cards.length) {
@@ -1239,6 +1864,377 @@ async function revealFullRecord() {
 }
 
 document.getElementById('cdRevealBtn')?.addEventListener('click', revealFullRecord);
+
+// ---- Test Buy modal -------------------------------------------------
+// Per-customer manual test purchase. Opens a modal, lets the operator
+// pick a live truck + a card (sandbox vs real customer card), fires a
+// daemon-driven checkout, and reports the outcome + AI diagnosis.
+
+const TB_STATE = {
+    pollTimer: null,
+    testId:    null,
+    cards:     [],   // QuickBeed payment methods for the current customer
+};
+
+function _tbModal() { return document.getElementById('testBuyModal'); }
+
+function _tbResetForm() {
+    document.getElementById('tbResult').hidden = true;
+    _tbModal().querySelectorAll('.test-buy-section, .test-buy-actions').forEach(el => {
+        if (!el.closest('.test-buy-result')) el.hidden = false;
+    });
+    document.getElementById('tbSubmitBtn').disabled = false;
+    document.getElementById('tbResultDiagnose').hidden = true;
+    document.getElementById('tbResultDiagnoseBody').innerHTML = '<em>Analyzing failure…</em>';
+    document.getElementById('tbResultStatus').dataset.state = '';
+    document.getElementById('tbResultText').textContent = 'Starting test purchase…';
+    document.getElementById('tbResultDetail').textContent = '';
+    document.getElementById('tbRunAgain').hidden = true;
+    if (TB_STATE.pollTimer) { clearTimeout(TB_STATE.pollTimer); TB_STATE.pollTimer = null; }
+}
+
+async function openTestBuyModal() {
+    if (!_currentCustomerId) return;
+    const modal = _tbModal();
+    if (!modal) return;
+    _tbResetForm();
+    document.getElementById('tbCustomerLabel').textContent =
+        $('#cdName').textContent + ' · ' + _currentCustomerId;
+    modal.hidden = false;
+
+    // Load live trucks and card list in parallel.
+    await Promise.all([_tbLoadTrucks(), _tbLoadCards()]);
+}
+
+async function _tbLoadTrucks() {
+    const sel  = document.getElementById('tbTruckSelect');
+    const hint = document.getElementById('tbTruckHint');
+    const url  = document.getElementById('tbTruckUrl');
+    sel.innerHTML = `<option value="">Loading recent trucks…</option>`;
+    try {
+        const r = await api('/api/admin/live-trucks?window_minutes=1440&limit=200').then(r => r.json());
+        const trucks = r?.data || [];
+        if (!trucks.length) {
+            sel.innerHTML = `<option value="">— no trucks seen in the last 24 hours —</option>`;
+            hint.textContent = 'Paste a truck URL in the field below to buy something the monitor hasn\'t scanned.';
+            return;
+        }
+        const opts = ['<option value="">— pick a truck —</option>'];
+        const availTrucks = trucks.filter(t => t.available);
+        const soldOut     = trucks.filter(t => !t.available);
+        if (availTrucks.length) {
+            opts.push(`<optgroup label="Available now (${availTrucks.length})">`);
+            for (const t of availTrucks) {
+                const price = (t.price != null) ? `  ·  $${Number(t.price).toLocaleString()}` : '';
+                const tracked = t.tracked ? '  ·  [tracked]' : '';
+                opts.push(`<option value="${escape(t.url)}" data-name="${escape(t.name)}">${escape(t.name)}${price}${tracked}</option>`);
+            }
+            opts.push('</optgroup>');
+        }
+        if (soldOut.length) {
+            opts.push(`<optgroup label="Last seen sold out (${soldOut.length})">`);
+            for (const t of soldOut) {
+                const price = (t.price != null) ? `  ·  $${Number(t.price).toLocaleString()}` : '';
+                opts.push(`<option value="${escape(t.url)}" data-name="${escape(t.name)}">${escape(t.name)}${price}  ·  sold out</option>`);
+            }
+            opts.push('</optgroup>');
+        }
+        sel.innerHTML = opts.join('');
+        hint.textContent = `${r.available_count || 0} available · ${(r.total_count || 0) - (r.available_count || 0)} sold out · last 24 hours. For products the monitor doesn't track, paste a Good360 truck URL below.`;
+        // Whenever the dropdown changes, mirror its value into the
+        // URL input so the operator can edit it freely.
+        sel.onchange = () => { if (sel.value) url.value = sel.value; };
+    } catch (e) {
+        sel.innerHTML = `<option value="">— load failed —</option>`;
+        hint.textContent = 'Failed to load trucks: ' + (e?.message || e);
+    }
+}
+
+async function _tbLoadCards() {
+    const primaryLabel = document.getElementById('tbPrimaryLabel');
+    const fallbackBox  = document.getElementById('tbFallbackCards');
+    fallbackBox.innerHTML = '';
+    primaryLabel.textContent = 'loading…';
+    try {
+        const r = await api(`/api/admin/customers/${encodeURIComponent(_currentCustomerId)}/live?reason=test_purchase_setup`)
+                       .then(r => r.json());
+        const cards = (r?.data?.payment_methods) || [];
+        TB_STATE.cards = cards;
+        const primary = cards.find(c => c.rank === 'primary') || cards[0];
+        if (primary) {
+            primaryLabel.textContent =
+                `${primary.card_network || 'card'} ****${primary.card_last4 || '????'} · ` +
+                `${String(primary.exp_month || '').padStart(2, '0')}/${primary.exp_year || '??'} · ` +
+                `${primary.name_on_card || 'no name'}`;
+        } else {
+            primaryLabel.textContent = '— no primary card on file —';
+            document.querySelector('input[name="tb-card"][value="primary"]').disabled = true;
+        }
+        const fallbacks = cards.filter(c => c.rank !== 'primary');
+        fallbackBox.innerHTML = fallbacks.map((c, i) => `
+            <label class="test-buy-radio">
+                <input type="radio" name="tb-card" value="fallback:${i}">
+                <span class="test-buy-radio-body">
+                    <span class="test-buy-radio-title">Fallback card ${i + 1} <span class="warn-pill">REAL CHARGE</span></span>
+                    <span class="test-buy-radio-sub mono">${escape(c.card_network || 'card')} ****${escape(c.card_last4 || '????')} · ${String(c.exp_month || '').padStart(2, '0')}/${escape(String(c.exp_year || '??'))} · ${escape(c.name_on_card || 'no name')}</span>
+                </span>
+            </label>
+        `).join('');
+    } catch (e) {
+        primaryLabel.textContent = 'failed to load — using sandbox only';
+        document.querySelector('input[name="tb-card"][value="primary"]').disabled = true;
+    }
+}
+
+function _tbCloseModal() {
+    if (TB_STATE.pollTimer) { clearTimeout(TB_STATE.pollTimer); TB_STATE.pollTimer = null; }
+    _tbModal().hidden = true;
+}
+
+async function _tbSubmit() {
+    // URL input is the source of truth — dropdown selection mirrors
+    // into it on change, but the operator can also paste a URL the
+    // monitor hasn't seen. Fall back to the dropdown if the URL field
+    // is empty (e.g., the operator clicked "Run autobuy now" without
+    // editing the URL).
+    const truckSel  = document.getElementById('tbTruckSelect');
+    const urlInput  = document.getElementById('tbTruckUrl');
+    const truckUrl  = (urlInput.value.trim() || truckSel.value || '').trim();
+    let truckName   = truckSel.options[truckSel.selectedIndex]?.dataset.name || '';
+    if (!truckUrl) { alert('Pick a truck from the dropdown or paste a truck URL.'); return; }
+    // If the URL was hand-pasted (doesn't match the dropdown), derive a
+    // human-ish name from the URL path so the alerts/audit log have
+    // something readable.
+    if (!truckName || truckUrl !== truckSel.value) {
+        try {
+            const parts = new URL(truckUrl).pathname.split('/').filter(Boolean);
+            truckName = decodeURIComponent(parts[parts.length - 1] || 'manual-truck').replace(/[-_]+/g, ' ');
+        } catch { truckName = 'manual-truck'; }
+    }
+
+    const cardChoice = document.querySelector('input[name="tb-card"]:checked')?.value || 'sandbox';
+    const cardLabelText = document.querySelector('input[name="tb-card"]:checked')
+                                ?.closest('.test-buy-radio')
+                                ?.querySelector('.test-buy-radio-title')
+                                ?.textContent?.trim() || cardChoice;
+
+    // One unambiguous confirm dialog for every submit. The user keeps
+    // asking for a *real* autobuy — they should know exactly what's
+    // about to happen and have the chance to back out.
+    const confirmMsg =
+        `Run a REAL autobuy now?\n\n` +
+        `Truck:    ${truckName}\n` +
+        `Card:     ${cardLabelText}\n` +
+        `Customer: ${$('#cdName').textContent}\n\n` +
+        (cardChoice === 'sandbox'
+            ? 'Sandbox card will be REJECTED by Good360 at the payment step (no money moves), but the truck IS reserved for ~15 minutes against this customer\'s account.'
+            : '⚠️ This will place a REAL ORDER and charge the cardholder.') +
+        `\n\nProceed?`;
+    if (!confirm(confirmMsg)) return;
+
+    // Hide the form, show the result panel.
+    _tbModal().querySelectorAll('.test-buy-section, .test-buy-actions').forEach(el => {
+        if (!el.closest('.test-buy-result')) el.hidden = true;
+    });
+    document.getElementById('tbResult').hidden = false;
+    document.getElementById('tbResultStatus').dataset.state = 'running';
+    document.getElementById('tbResultText').textContent =
+        `Running test buy · ${cardChoice} · ${truckName.slice(0, 60)}`;
+
+    try {
+        const r = await api(`/api/admin/customers/${encodeURIComponent(_currentCustomerId)}/test-purchase`, {
+            method: 'POST',
+            body: JSON.stringify({
+                truck_url:   truckUrl,
+                truck_name:  truckName,
+                card_choice: cardChoice,
+                live_submit: true,  // always real — daemon clicks Place Order
+            }),
+        }).then(r => r.json());
+        if (!r.success) throw new Error(r.error || 'submit failed');
+        TB_STATE.testId = r.data.test_id;
+        _tbStartPolling(r.data.test_id);
+    } catch (e) {
+        _tbRenderFinalResult({
+            status: 'failed',
+            result_summary: 'kickoff failed: ' + (e?.message || e),
+            error: String(e?.message || e),
+        });
+    }
+}
+
+function _tbStartPolling(testId) {
+    const poll = async () => {
+        let row;
+        try {
+            const r = await api(`/api/admin/test-runs/${testId}`).then(r => r.json());
+            if (!r.success) throw new Error(r.error || 'fetch failed');
+            row = r.data;
+        } catch (e) {
+            _tbRenderFinalResult({
+                status: 'failed',
+                result_summary: 'poll failed: ' + (e?.message || e),
+            });
+            return;
+        }
+        const s = (row.status || '').toLowerCase();
+        document.getElementById('tbResultText').textContent =
+            `${s} · ${row.result_summary || ''}`.slice(0, 200);
+
+        if (s === 'completed' || s === 'failed') {
+            _tbRenderFinalResult(row);
+            return;
+        }
+        TB_STATE.pollTimer = setTimeout(poll, 2500);
+    };
+    poll();
+}
+
+function _tbRenderFinalResult(row) {
+    const summary = (row.result_summary || '').trim();
+    const upper = summary.toUpperCase();
+    // Map the daemon-status prefix in result_summary onto a CSS state.
+    let state = 'failed';
+    if (upper.startsWith('SUCCESS')) state = 'success';
+    else if (upper.startsWith('MISSED')) state = 'missed';
+    else if (upper.startsWith('MANUAL')) state = 'manual';
+    else if (upper.startsWith('DRY_RUN')) state = 'success';
+    else if (row.status === 'completed') state = 'success';
+    document.getElementById('tbResultStatus').dataset.state = state;
+    document.getElementById('tbResultText').textContent =
+        state === 'success' ? `PASS · ${summary}` :
+        state === 'missed'  ? `MISSED · ${summary}` :
+        state === 'manual'  ? `MANUAL · ${summary}` :
+                              `FAIL · ${summary}`;
+    document.getElementById('tbResultDetail').textContent = row.error || '';
+    document.getElementById('tbRunAgain').hidden = false;
+
+    // If it didn't pass, fetch an AI diagnosis using the same B6 endpoint
+    // the purchases page uses. The test_runs row id IS a legacy purchase
+    // attempt for diagnosis purposes — actually it isn't; diagnose
+    // expects (source, attempt_id) tied to legacy_purchase_attempts.
+    // Skip the diagnosis fetch for test_runs and just show the raw row.
+    // For real diagnosis on test failures we'd need to wire diagnose to
+    // also accept test_run ids; that's a follow-up.
+    if (state !== 'success') {
+        _tbFetchDiagnoseForRow(row);
+    }
+}
+
+async function _tbFetchDiagnoseForRow(row) {
+    // Build a synthetic failure record from the test_runs row and ask
+    // the diagnose endpoint for analysis. We POST it to a small new
+    // server-side helper rather than reusing the per-purchase route
+    // (different shape, different keys).
+    const box = document.getElementById('tbResultDiagnose');
+    const body = document.getElementById('tbResultDiagnoseBody');
+    box.hidden = false;
+    body.innerHTML = '<em class="diagnose-loading">Analyzing failure…</em>';
+    try {
+        const r = await api(`/api/admin/test-runs/${row.id}/diagnose`).then(r => r.json());
+        if (!r.success) throw new Error(r.error || 'diagnose failed');
+        const d = r.data || {};
+        const action = d.suggested_action
+            ? `<div class="diagnose-action"><span class="diagnose-action-label">Next step</span> ${escape(d.suggested_action)}</div>`
+            : '';
+        body.innerHTML = `<p class="diagnose-text">${escape(d.diagnosis || '')}</p>${action}`;
+    } catch (e) {
+        body.innerHTML = `<span class="diagnose-error">Could not run diagnosis: ${escape(String(e?.message || e))}</span>`;
+    }
+}
+
+document.getElementById('cdTestBuyBtn')?.addEventListener('click', openTestBuyModal);
+document.getElementById('tbCancelBtn')?.addEventListener('click', _tbCloseModal);
+document.getElementById('tbCloseAfter')?.addEventListener('click', _tbCloseModal);
+document.getElementById('tbReloadTrucks')?.addEventListener('click', (e) => { e.preventDefault(); _tbLoadTrucks(); });
+document.getElementById('tbSubmitBtn')?.addEventListener('click', _tbSubmit);
+document.getElementById('tbRunAgain')?.addEventListener('click', () => { _tbResetForm(); _tbLoadTrucks(); });
+_tbModal()?.addEventListener('click', (ev) => {
+    // Click on the backdrop closes (but not on the card itself).
+    if (ev.target === _tbModal()) _tbCloseModal();
+});
+
+// ---- Per-field credential reveal (eye toggle) ------------------------
+// The Partner credentials section has two rows (username + password)
+// each with an eye button. First click on a row fetches the credentials
+// (audit-logged on both this dashboard and QuickBeed) and reveals only
+// that row; subsequent clicks toggle masked/revealed without re-fetching.
+// Both rows share the same fetch — once one is fetched, the other can
+// reveal instantly from cache.
+
+function _resetCredRow(field) {
+    const dd = document.querySelector(`#cdCreds [data-cred-field="${field}"]`);
+    if (!dd) return;
+    const span = dd.querySelector('.cred-value');
+    span.textContent = '••••••••';
+    span.dataset.state = 'masked';
+    const btn = dd.querySelector('.cred-eye');
+    if (btn) {
+        btn.querySelector('.cred-eye-show').style.display = '';
+        btn.querySelector('.cred-eye-hide').style.display = 'none';
+        btn.setAttribute('aria-label', `Show ${field}`);
+        btn.disabled = false;
+    }
+}
+
+function _setCredRow(field, value, { revealed }) {
+    const dd = document.querySelector(`#cdCreds [data-cred-field="${field}"]`);
+    if (!dd) return;
+    const span = dd.querySelector('.cred-value');
+    if (revealed) {
+        span.textContent = value || '(empty)';
+        span.dataset.state = 'revealed';
+        const btn = dd.querySelector('.cred-eye');
+        btn.querySelector('.cred-eye-show').style.display = 'none';
+        btn.querySelector('.cred-eye-hide').style.display = '';
+        btn.setAttribute('aria-label', `Hide ${field}`);
+    } else {
+        span.textContent = '••••••••';
+        span.dataset.state = 'masked';
+        const btn = dd.querySelector('.cred-eye');
+        btn.querySelector('.cred-eye-show').style.display = '';
+        btn.querySelector('.cred-eye-hide').style.display = 'none';
+        btn.setAttribute('aria-label', `Show ${field}`);
+    }
+}
+
+async function _ensureCredsFetched() {
+    if (_credCache.username !== undefined && _credCache.password !== undefined) return true;
+    if (!_currentCustomerId) return false;
+    const url = `/api/admin/customers/${encodeURIComponent(_currentCustomerId)}/credentials?reason=support_investigation`;
+    try {
+        const r = await api(url).then(r => r.json());
+        if (!r.success) {
+            $('#cdCredsSub').textContent = 'reveal failed: ' + (r.error || 'unknown');
+            return false;
+        }
+        _credCache.username = r.data.username || '';
+        _credCache.password = r.data.password || '';
+        $('#cdCredsSub').innerHTML = `live (audit-logged · reason=<code class="mono">${escape(r.data._reason_logged || '—')}</code>)`;
+        return true;
+    } catch (e) {
+        $('#cdCredsSub').textContent = 'reveal failed: ' + (e?.message || e);
+        return false;
+    }
+}
+
+document.getElementById('cdCreds')?.addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('.cred-eye');
+    if (!btn) return;
+    const field = btn.dataset.credToggle;
+    const dd = btn.closest('[data-cred-field]');
+    const span = dd?.querySelector('.cred-value');
+    const isRevealed = span?.dataset.state === 'revealed';
+    if (isRevealed) {
+        _setCredRow(field, '', { revealed: false });
+        return;
+    }
+    btn.disabled = true;
+    const ok = await _ensureCredsFetched();
+    btn.disabled = false;
+    if (!ok) return;
+    _setCredRow(field, _credCache[field] || '', { revealed: true });
+});
 
 function renderKV(selector, pairs) {
     const el = document.querySelector(selector);
@@ -1336,6 +2332,10 @@ const SETTING_GROUPS = [
         'ALERT_EMAIL_FROM', 'ALERT_EMAIL_TO',
     ]},
     {name: 'Mission Control', keys: ['MISSIONCONTROL_API_KEY']},
+    {name: 'AI · OpenRouter (failure diagnosis)', keys: [
+        'OPENROUTER_API_KEY',
+        'OPENROUTER_MODEL',
+    ]},
     {name: 'QuickBeed customer sync', span: 2, keys: [
         'QUICKBEED_BASE_URL',
         'QUICKBEED_APP_ID',
@@ -1345,6 +2345,7 @@ const SETTING_GROUPS = [
         'QUICKBEED_POLL_INTERVAL_SECONDS',
         'QUICKBEED_DRY_RUN',
     ]},
+    {name: 'Scan cadence', keys: ['MONITOR_INTERVAL_SECONDS']},
     {name: 'Runtime', keys: ['TZ', 'LOG_LEVEL', 'WORKDIR']},
     {name: 'DevTools agent', span: 2, keys: [
         'AUTOBUY_ENGINE', 'DEVTOOLS_AGENT_MODEL',
@@ -1377,21 +2378,66 @@ async function loadSettings() {
             const previewText = meta.set
                 ? (isSecret ? meta.preview : '✓ set')
                 : '';
-            row.innerHTML = `
-                <label for="set_${k}">
-                    <span>${k}</span>
-                    <span class="preview">${escape(previewText)}</span>
-                </label>
-                <input id="set_${k}" name="${k}" type="${isSecret ? 'password' : 'text'}"
-                       autocomplete="off"
-                       placeholder="${isSecret && meta.set ? '(unchanged — leave blank to keep)' : ''}"
-                       value="${escape(meta.value || '')}"
-                       ${isSuper ? '' : 'readonly'}>
-            `;
+            if (k === 'MONITOR_INTERVAL_SECONDS') {
+                renderScanCadenceRow(row, k, meta, isSuper);
+            } else {
+                row.innerHTML = `
+                    <label for="set_${k}">
+                        <span>${k}</span>
+                        <span class="preview">${escape(previewText)}</span>
+                    </label>
+                    <input id="set_${k}" name="${k}" type="${isSecret ? 'password' : 'text'}"
+                           autocomplete="off"
+                           placeholder="${isSecret && meta.set ? '(unchanged — leave blank to keep)' : ''}"
+                           value="${escape(meta.value || '')}"
+                           ${isSuper ? '' : 'readonly'}>
+                `;
+            }
             div.appendChild(row);
         }
         root.appendChild(div);
     }
+}
+
+function renderScanCadenceRow(row, k, meta, isSuper) {
+    // Slider over seconds-between-scan-cycles. Range matches what the
+    // monitor's scan loop can sustain: <5s and the scan body (login +
+    // browse) hasn't even finished; 120s and we'd miss the <2s sellouts
+    // that drove the original speedup. Default 10s if unset.
+    const MIN = 5, MAX = 120, DEFAULT = 10;
+    const cur = parseInt(meta.value, 10);
+    const val = Number.isFinite(cur) && cur >= MIN && cur <= MAX ? cur : DEFAULT;
+    row.classList.add('setting-row--slider');
+    row.innerHTML = `
+        <label for="set_${k}">
+            <span>${k}</span>
+            <span class="preview" id="scanCadencePreview">every ${val}s</span>
+        </label>
+        <div class="scan-cadence-control">
+            <input id="set_${k}_slider" type="range"
+                   min="${MIN}" max="${MAX}" step="1" value="${val}"
+                   ${isSuper ? '' : 'disabled'}>
+            <input id="set_${k}" name="${k}" type="number"
+                   min="${MIN}" max="${MAX}" step="1" value="${val}"
+                   ${isSuper ? '' : 'readonly'}>
+            <span class="scan-cadence-unit">seconds</span>
+        </div>
+        <div class="scan-cadence-hint">
+            Faster cadence catches the <em>&lt;2s</em> sellouts but costs
+            ~6× more requests to Good360. Save &amp; Apply recreates the
+            monitor container so the new value takes effect.
+        </div>
+    `;
+    const slider = row.querySelector('#set_' + k + '_slider');
+    const number = row.querySelector('#set_' + k);
+    const preview = row.querySelector('#scanCadencePreview');
+    const sync = (src, dest) => {
+        const v = Math.max(MIN, Math.min(MAX, parseInt(src.value, 10) || DEFAULT));
+        dest.value = v;
+        preview.textContent = `every ${v}s`;
+    };
+    slider.addEventListener('input', () => sync(slider, number));
+    number.addEventListener('input', () => sync(number, slider));
 }
 
 async function saveSettings() {
@@ -1925,6 +2971,8 @@ function renderRoster(d) {
         $('#rosterNext').innerHTML = `<span class="roster-empty">No customer eligible right now</span>`;
     }
 
+    renderQueueList(queue);
+
     // Last buy
     if (last && last.last_purchase_at) {
         $('#rosterLast').innerHTML = customerChip(last, {
@@ -1946,6 +2994,132 @@ function renderRoster(d) {
         }).join('');
     } else {
         $('#rosterCool').innerHTML = `<span class="roster-empty">Nobody cooling off</span>`;
+    }
+}
+
+// ---- Queue order: drag-and-drop the eligible customer list ----
+// The server's GET /api/admin/roster/queue already returns rows in the
+// effective selection order (manual_queue_position first, LRU fallback).
+// On drop we POST the new order; the server clears manual positions for
+// rows not in the list so they fall back to LRU behind the ranked set.
+// Cooldown rows aren't shown here — they re-enter at their manual slot
+// when their cooldown clears, so the operator's order is preserved.
+
+let _queueDragId = null;
+let _queueLastSaved = null;
+let _queueSaveTimer = null;
+
+function renderQueueList(queue) {
+    const root = $('#rosterQueueList');
+    if (!root) return;
+    if (!queue.length) {
+        root.innerHTML = '';
+        $('#rosterQueueStatus').textContent = 'No customers eligible right now';
+        $('#rosterQueueStatus').className = 'queue-status';
+        return;
+    }
+    // Only re-render the DOM when the *set* of ids changes — otherwise the
+    // 5-second poll would yank the list out from under a mid-drag operator.
+    const newIds = queue.map(c => c.id).join('|');
+    if (root.dataset.ids === newIds && !root.dataset.dirty) {
+        return;
+    }
+    root.dataset.ids = newIds;
+    delete root.dataset.dirty;
+    root.innerHTML = queue.map(c => `
+        <li class="queue-list__item" draggable="true" data-id="${escape(c.id)}" title="${escape(c.organization_name || c.full_name || c.id)}">
+            <span class="queue-name">${escape(shortName(c))}</span>
+            <span class="queue-handle" aria-hidden="true">⋮⋮</span>
+        </li>
+    `).join('');
+    // Wire up drag handlers on the freshly-rendered items.
+    root.querySelectorAll('.queue-list__item').forEach(li => {
+        li.addEventListener('dragstart', onQueueDragStart);
+        li.addEventListener('dragend', onQueueDragEnd);
+        li.addEventListener('dragover', onQueueDragOver);
+        li.addEventListener('dragleave', onQueueDragLeave);
+        li.addEventListener('drop', onQueueDrop);
+    });
+}
+
+function onQueueDragStart(e) {
+    _queueDragId = this.dataset.id;
+    this.classList.add('dragging');
+    // Firefox requires setData to initiate a drag.
+    try { e.dataTransfer.setData('text/plain', _queueDragId); } catch (_) {}
+    e.dataTransfer.effectAllowed = 'move';
+}
+function onQueueDragEnd() {
+    this.classList.remove('dragging');
+    document.querySelectorAll('.queue-list__item.drag-over')
+        .forEach(el => el.classList.remove('drag-over'));
+    _queueDragId = null;
+}
+function onQueueDragOver(e) {
+    e.preventDefault();
+    if (!_queueDragId || this.dataset.id === _queueDragId) return;
+    this.classList.add('drag-over');
+    e.dataTransfer.dropEffect = 'move';
+}
+function onQueueDragLeave() {
+    this.classList.remove('drag-over');
+}
+function onQueueDrop(e) {
+    e.preventDefault();
+    this.classList.remove('drag-over');
+    const dragged = _queueDragId;
+    const targetId = this.dataset.id;
+    if (!dragged || !targetId || dragged === targetId) return;
+    const list = $('#rosterQueueList');
+    const draggedEl = list.querySelector(`[data-id="${CSS.escape(dragged)}"]`);
+    if (!draggedEl) return;
+    // Insert dragged before the drop target. Drop into the lower half of the
+    // target's box → insert after instead, so the operator can move to the
+    // bottom of the list intuitively.
+    const rect = this.getBoundingClientRect();
+    const after = (e.clientY - rect.top) > rect.height / 2;
+    if (after) this.after(draggedEl); else this.before(draggedEl);
+    // Mark dirty so the next poll doesn't clobber our DOM before save returns.
+    list.dataset.dirty = '1';
+    scheduleQueueSave();
+}
+
+function scheduleQueueSave() {
+    // Debounce: a fast operator may move several rows before settling.
+    if (_queueSaveTimer) clearTimeout(_queueSaveTimer);
+    _queueSaveTimer = setTimeout(saveQueueOrder, 250);
+}
+
+async function saveQueueOrder() {
+    const list = $('#rosterQueueList');
+    if (!list) return;
+    const order = [...list.querySelectorAll('.queue-list__item')]
+        .map(li => li.dataset.id);
+    if (!order.length) return;
+    const orderKey = order.join('|');
+    if (orderKey === _queueLastSaved) return;
+    const status = $('#rosterQueueStatus');
+    status.textContent = 'Saving…';
+    status.className = 'queue-status';
+    try {
+        const r = await api('/api/admin/roster/queue/reorder', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({order}),
+        });
+        const j = await r.json();
+        if (!j.success) throw new Error(j.error || 'reorder failed');
+        _queueLastSaved = orderKey;
+        // Refresh the dataset.ids cache so the next poll doesn't think the
+        // server-side order has changed and force a re-render.
+        list.dataset.ids = orderKey;
+        status.textContent = `Saved — ${j.data?.ranked ?? order.length} ranked`;
+        status.className = 'queue-status ok';
+    } catch (err) {
+        status.textContent = `Save failed: ${err.message || err}`;
+        status.className = 'queue-status err';
+        // Clear the dirty flag so the next poll restores server truth.
+        delete list.dataset.dirty;
     }
 }
 
@@ -2005,6 +3179,7 @@ function renderNotifications() {
     const start = NOTIF_STATE.page * NOTIF_STATE.perPage;
     const slice = NOTIF_STATE.rows.slice(start, start + NOTIF_STATE.perPage);
 
+    const isSuper = CURRENT_USER && CURRENT_USER.role === 'super_admin';
     el.innerHTML = slice.map(n => {
         const expanded = NOTIF_STATE.expanded.has(n.id);
         const pillCls = n.level === 'error'   ? 'err'
@@ -2018,6 +3193,11 @@ function renderNotifications() {
             ? '<span class="check-stat-pill ok">delivered</span>'
             : '<span class="check-stat-pill err">not delivered</span>';
         const lvlPill = `<span class="check-stat-pill ${pillCls}">${escape(n.level)}</span>`;
+        const delBtn  = isSuper
+            ? `<button type="button" class="row-delete-btn" title="Delete this notification" data-del-notif="${escape(String(n.id))}">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+               </button>`
+            : '';
         return `
             <div class="check-row${expanded ? ' expanded' : ''}" data-notif-id="${n.id}">
                 <div class="check-row__head">
@@ -2028,7 +3208,7 @@ function renderNotifications() {
                         <span class="check-title-time" title="${escape(n.ts)}">${escape(time)}</span>
                         <span>${escape(n.title || '(no title)')}</span>
                     </span>
-                    <span class="check-row__summary">${lvlPill}${source}${channel}${deliv}</span>
+                    <span class="check-row__summary">${lvlPill}${source}${channel}${deliv}${delBtn}</span>
                 </div>
                 <div class="check-row__body">
                     <pre class="check-line log-info" style="margin:0">${escape(n.message || '')}</pre>
@@ -2039,11 +3219,29 @@ function renderNotifications() {
     }).join('');
 
     el.querySelectorAll('.check-row').forEach(row => {
-        row.querySelector('.check-row__head').addEventListener('click', () => {
+        row.querySelector('.check-row__head').addEventListener('click', (e) => {
+            // Delete button click is its own action — don't expand the row.
+            if (e.target.closest('.row-delete-btn')) return;
             const id = Number(row.dataset.notifId);
             if (NOTIF_STATE.expanded.has(id)) NOTIF_STATE.expanded.delete(id);
             else NOTIF_STATE.expanded.add(id);
             row.classList.toggle('expanded');
+        });
+        const delBtn = row.querySelector('.row-delete-btn');
+        if (delBtn) delBtn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const id = delBtn.dataset.delNotif;
+            if (!window.confirm('Delete this notification? This cannot be undone.')) return;
+            delBtn.disabled = true;
+            try {
+                const res = await api(`/api/admin/notifications/${encodeURIComponent(id)}`, {method: 'DELETE'}).then(r => r.json());
+                if (!res.success) throw new Error(res.error || 'delete failed');
+                loadNotifications();
+                loadSidebarBadges();
+            } catch (err) {
+                delBtn.disabled = false;
+                window.alert('Delete failed: ' + (err.message || err));
+            }
         });
     });
 
@@ -2072,6 +3270,27 @@ document.querySelectorAll('#notifFilters .filter-pill').forEach(btn => {
 });
 
 $('#notifRefreshBtn')?.addEventListener('click', () => loadNotifications());
+
+$('#notifClearBtn')?.addEventListener('click', async () => {
+    const lvl = NOTIF_STATE.level;
+    const params = new URLSearchParams();
+    if (lvl) params.set('level', lvl);
+    else     params.set('confirm', '1');  // unfiltered nuke needs explicit confirm flag
+    const human = lvl ? `all "${lvl}" notifications` : 'EVERY notification (no level filter active)';
+    if (!window.confirm(`Delete ${human}?\n\nThis cannot be undone.`)) return;
+    const btn = $('#notifClearBtn');
+    btn.disabled = true;
+    try {
+        const res = await api('/api/admin/notifications?' + params.toString(), {method: 'DELETE'}).then(r => r.json());
+        if (!res.success) throw new Error(res.error || 'bulk delete failed');
+        loadNotifications();
+        loadSidebarBadges();
+    } catch (err) {
+        window.alert('Bulk delete failed: ' + (err.message || err));
+    } finally {
+        btn.disabled = false;
+    }
+});
 
 // ---------------- Test buy ----------------
 
@@ -2260,9 +3479,7 @@ let _testDetailPollTimer = null;
 
 function openTestDetail(id) {
     _currentTestId = id;
-    $$('.nav-item').forEach(x => x.classList.toggle('active', x.dataset.tab === 'testbuy'));
-    $$('.panel').forEach(p => p.classList.toggle('active', p.dataset.panel === 'test-detail'));
-    $('#crumbCurrent').textContent = TAB_TITLES['test-detail'];
+    activatePanelDirect('test-detail');
     loadTestDetail(id);
 }
 
@@ -2680,6 +3897,865 @@ document.querySelectorAll('#analyticsRange .filter-pill').forEach(btn => {
     });
 });
 
+// ---------------- Observed products (Scans tab) ----------------
+
+// Products data changes slowly (one new observation per truck per scan),
+// so don't burn a request every 5s when the scans table refreshes. Cap
+// product fetches to once per minute regardless of how often loadScans
+// fires.
+const PRODUCTS_REFRESH_MS = 60_000;
+let _lastProductsFetch = 0;
+
+function maybeRefreshProducts() {
+    const now = Date.now();
+    if (now - _lastProductsFetch < PRODUCTS_REFRESH_MS) return;
+    _lastProductsFetch = now;
+    loadProducts().catch(e => {
+        console.error('[products]', e);
+        // Let a failed fetch retry sooner so the table isn't stuck stale.
+        _lastProductsFetch = now - (PRODUCTS_REFRESH_MS - 10_000);
+    });
+}
+
+// Track whether we've ever rendered a non-loading body. On the first call we
+// show the "Loading…" placeholder; on every subsequent call we keep the
+// existing rows visible until the new data is ready, then swap. Prevents
+// the table from flashing back to "Loading…" each refresh.
+let PRODUCTS_LOADED_ONCE = false;
+
+// Names of rows the operator has expanded — persisted across refreshes so
+// auto-refresh doesn't snap the open description row shut every cycle.
+const PRODUCT_EXPANDED = new Set();
+
+// Pagination state for the Observed Products table.
+const PRODUCTS_PER_PAGE = 6;
+let PRODUCTS_PAGE = 0;
+// Cache the last products payload so the detail page + pager don't refetch
+// every interaction.
+let PRODUCTS_CACHE = [];
+
+async function loadProducts() {
+    const tbody = $('#productsTable tbody');
+    if (!PRODUCTS_LOADED_ONCE) {
+        tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state">Loading…</div></td></tr>`;
+    }
+    let products = [];
+    let mode = 'unknown';
+    try {
+        const r = await api('/api/admin/scans/products').then(r => r.json());
+        products = r.data || [];
+        mode = r.mode || 'unknown';
+    } catch (e) {
+        if (!PRODUCTS_LOADED_ONCE) {
+            tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state">Failed to load products.</div></td></tr>`;
+        }
+        return;
+    }
+    PRODUCTS_LOADED_ONCE = true;
+    PRODUCTS_CACHE = products;
+    const modeBadge = `<span class="pill ${mode === 'live' ? 'err' : 'idle'}" style="margin-left:6px">${escape(mode)}</span>`;
+    $('#productsSub').innerHTML =
+        `${products.length} unique product${products.length === 1 ? '' : 's'} seen on this site${modeBadge}`;
+    if (!products.length) {
+        tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state">No products observed yet — they'll appear after the monitor's first scan in ${escape(mode)} mode.</div></td></tr>`;
+        $('#productsPager').hidden = true;
+        return;
+    }
+
+    // Pagination: clamp current page, slice, render the pager controls.
+    const totalPages = Math.max(1, Math.ceil(products.length / PRODUCTS_PER_PAGE));
+    if (PRODUCTS_PAGE >= totalPages) PRODUCTS_PAGE = totalPages - 1;
+    if (PRODUCTS_PAGE < 0) PRODUCTS_PAGE = 0;
+    const sliceStart = PRODUCTS_PAGE * PRODUCTS_PER_PAGE;
+    const slice = products.slice(sliceStart, sliceStart + PRODUCTS_PER_PAGE);
+
+    const pager = $('#productsPager');
+    if (pager) {
+        pager.hidden = totalPages <= 1;
+        $('#productsPagerInfo').textContent = `${PRODUCTS_PAGE + 1} / ${totalPages}`;
+        pager.querySelector('[data-pg="prev"]').disabled = PRODUCTS_PAGE === 0;
+        pager.querySelector('[data-pg="next"]').disabled = PRODUCTS_PAGE >= totalPages - 1;
+    }
+
+    tbody.innerHTML = '';
+    for (const p of slice) {
+        const availRate = p.observations
+            ? `${Math.round((p.available_count / p.observations) * 100)}%`
+            : '—';
+        const expanded = PRODUCT_EXPANDED.has(p.name);
+        const priceText = (p.price != null) ? `$${Number(p.price).toLocaleString(undefined, {maximumFractionDigits: 2})}` : '—';
+        const priceSourceTag = p.price_source === 'manual'
+            ? ' <span class="pill ok" style="margin-left:4px;font-size:9px;padding:1px 5px">manual</span>'
+            : '';
+        const rowCls = 'product-row' + (p.tracked ? '' : ' untracked') + (expanded ? ' expanded' : '');
+
+        const tr = document.createElement('tr');
+        tr.className = rowCls;
+        tr.dataset.name = p.name;
+        tr.innerHTML = `
+            <td class="expand-cell" data-action="toggle-detail">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+            </td>
+            <td data-label="Product">
+                <a href="#" class="product-link" data-product-link="${escape(p.name)}">${escape(p.name)}</a>
+            </td>
+            <td class="num mono" data-label="Price">${priceText}${priceSourceTag}</td>
+            <td class="num" data-label="Available" title="${p.available_count} of ${p.observations} observations">${p.available_count} (${availRate})</td>
+            <td class="mono" data-label="Last seen" title="${escape(p.last_seen || '')}">${p.last_seen ? escape(formatHumanTime(p.last_seen)) : '—'}</td>
+            <td data-label="Tracked">
+                <button class="autobuy-toggle ${p.tracked ? 'on' : ''}" type="button"
+                        data-product-toggle="tracked" data-name="${escape(p.name)}"
+                        aria-pressed="${p.tracked ? 'true' : 'false'}"
+                        title="${p.tracked ? 'Tracked' : 'Untracked — hidden from autobuy + alerts'}">
+                    <span class="autobuy-toggle__track"><span class="autobuy-toggle__thumb"></span></span>
+                </button>
+            </td>
+            <td data-label="Autobuy">
+                <button class="autobuy-toggle ${p.autobuy_enabled ? 'on' : ''}" type="button"
+                        data-product-toggle="autobuy" data-name="${escape(p.name)}"
+                        aria-pressed="${p.autobuy_enabled ? 'true' : 'false'}"
+                        ${p.tracked ? '' : 'disabled'}
+                        title="${p.autobuy_enabled ? 'Autobuy on' : 'Autobuy off — alert only'}">
+                    <span class="autobuy-toggle__track"><span class="autobuy-toggle__thumb"></span></span>
+                </button>
+            </td>
+        `;
+        tbody.appendChild(tr);
+
+        const detail = document.createElement('tr');
+        detail.className = 'product-detail' + (expanded ? ' shown' : '');
+        detail.dataset.name = p.name;
+        const manualPriceVal = p.manual_price != null ? p.manual_price : '';
+        const scrapedHint = p.scraped_price != null
+            ? `<span class="product-detail__hint">scraped price seen by the bot: $${Number(p.scraped_price).toLocaleString()}</span>`
+            : `<span class="product-detail__hint">Good360 hides prices from this account on the listing — set a manual price.</span>`;
+        detail.innerHTML = `<td colspan="7"><div class="product-detail__body">
+            <div class="product-detail__field">
+                <span class="product-detail__label">URL</span>
+                ${p.last_url
+                    ? `<a class="mono" href="${escape(p.last_url)}" target="_blank" rel="noopener" style="word-break:break-all">${escape(p.last_url)}</a>`
+                    : '<span class="mono" style="color:var(--text-mute)">(not seen with a URL yet)</span>'}
+            </div>
+            <div class="product-detail__field">
+                <span class="product-detail__label">Manual price</span>
+                <input type="number" min="0" step="0.01" class="product-detail__price-input"
+                       data-name="${escape(p.name)}" value="${manualPriceVal}"
+                       placeholder="e.g. 4828.45">
+                ${scrapedHint}
+                <button class="btn btn-ghost" type="button" data-fetch-price="${escape(p.name)}"
+                        style="margin-top:6px;align-self:flex-start;font-size:11px;padding:6px 12px">
+                    Fetch price via daemon
+                </button>
+            </div>
+            <div class="product-detail__field">
+                <span class="product-detail__label">Description</span>
+                <textarea class="product-detail__textarea" data-name="${escape(p.name)}" rows="3"
+                          placeholder="No description — click here to add one">${escape(p.description || '')}</textarea>
+                <span class="product-detail__hint">click outside to save</span>
+            </div>
+            <div class="product-detail__field">
+                <span class="product-detail__label">Stats</span>
+                <span class="mono" style="color:var(--text-dim)">${p.observations} observations · ${p.available_count} available · first seen ${escape(p.first_seen || '—')}</span>
+            </div>
+        </div></td>`;
+        tbody.appendChild(detail);
+    }
+
+    // Listeners are wired on the tbody — but loadProducts runs on a 60s
+    // refresh, so we'd register the same handler N times. Track on the
+    // element itself with a marker attribute.
+    if (!tbody.dataset.listenersAttached) {
+        tbody.addEventListener('click', _onProductsTableClick);
+        tbody.addEventListener('blur', _onDescriptionBlur, true);
+        tbody.dataset.listenersAttached = '1';
+    }
+}
+
+async function _toggleProduct(btn, kind) {
+    const name = btn.dataset.name;
+    const nextState = !btn.classList.contains('on');
+    btn.disabled = true;
+    try {
+        let url, body;
+        if (kind === 'tracked') {
+            url = '/api/admin/scans/products/tracked';
+            body = {name, tracked: nextState};
+        } else if (kind === 'autobuy') {
+            url = '/api/admin/scans/products/autobuy';
+            body = {name, autobuy_enabled: nextState};
+        } else {
+            return;
+        }
+        const r = await api(url, {method: 'POST', body: JSON.stringify(body)}).then(r => r.json());
+        if (!r.success) {
+            alert(r.error || 'failed');
+            return;
+        }
+        btn.classList.toggle('on', nextState);
+        btn.setAttribute('aria-pressed', String(nextState));
+        // Side-effects within the same row/page:
+        if (kind === 'tracked') {
+            const row = btn.closest('tr');
+            row?.classList.toggle('untracked', !nextState);
+            // Mirror the backend cascade: tracked=off forces autobuy=off.
+            // Find any autobuy toggle for this name (table row OR detail page).
+            document.querySelectorAll(`[data-product-toggle="autobuy"][data-name="${CSS.escape(name)}"]`).forEach(autoBtn => {
+                autoBtn.disabled = !nextState;
+                if (!nextState) {
+                    autoBtn.classList.remove('on');
+                    autoBtn.setAttribute('aria-pressed', 'false');
+                }
+            });
+        }
+    } catch (e) {
+        console.error('[products] toggle failed', e);
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+function _onProductsTableClick(e) {
+    const fetchBtn = e.target.closest('[data-fetch-price]');
+    if (fetchBtn) {
+        return _fetchProductPrice(fetchBtn);
+    }
+    const link = e.target.closest('[data-product-link]');
+    if (link) {
+        e.preventDefault();
+        return openProductDetail(link.dataset.productLink);
+    }
+    const toggle = e.target.closest('[data-product-toggle]');
+    if (toggle) {
+        return _toggleProduct(toggle, toggle.dataset.productToggle);
+    }
+    const expandCell = e.target.closest('[data-action="toggle-detail"]');
+    if (expandCell) {
+        const row = expandCell.closest('tr.product-row');
+        const detail = row?.nextElementSibling;
+        if (!row || !detail) return;
+        const name = row.dataset.name;
+        const isExpanded = row.classList.toggle('expanded');
+        detail.classList.toggle('shown', isExpanded);
+        if (isExpanded) PRODUCT_EXPANDED.add(name);
+        else            PRODUCT_EXPANDED.delete(name);
+    }
+}
+
+async function _onDescriptionBlur(e) {
+    const ta = e.target.closest('.product-detail__textarea');
+    if (ta) {
+        try {
+            await api('/api/admin/scans/products/description', {
+                method: 'POST',
+                body: JSON.stringify({name: ta.dataset.name, description: ta.value.trim()}),
+            });
+        } catch (err) { console.error('[products] description save failed', err); }
+        return;
+    }
+    const priceInput = e.target.closest('.product-detail__price-input');
+    if (priceInput) {
+        const raw = priceInput.value.trim();
+        const price = raw === '' ? null : Number(raw);
+        if (raw !== '' && !Number.isFinite(price)) return;
+        try {
+            await api('/api/admin/scans/products/price', {
+                method: 'POST',
+                body: JSON.stringify({name: priceInput.dataset.name, price}),
+            });
+            // Reload so the Price column reflects the new value.
+            loadProducts();
+        } catch (err) { console.error('[products] price save failed', err); }
+    }
+}
+
+async function _fetchProductPrice(btn) {
+    const name = btn.dataset.fetchPrice;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Fetching… (≤4 min)';
+    try {
+        const r = await api('/api/admin/scans/products/fetch-price', {
+            method: 'POST',
+            body: JSON.stringify({name}),
+        }).then(r => r.json());
+        if (r.success && r.price) {
+            btn.textContent = `Got $${Number(r.price).toLocaleString()}`;
+            // Refresh the table so the new price shows.
+            loadProducts();
+        } else {
+            btn.textContent = 'No price (truck unavailable?)';
+            alert(`Couldn't fetch price: ${r.message || r.error || 'unknown'}`);
+        }
+    } catch (e) {
+        console.error('[products] fetch-price failed', e);
+        btn.textContent = 'Fetch failed';
+    } finally {
+        setTimeout(() => {
+            btn.disabled = false;
+            btn.textContent = original;
+        }, 2500);
+    }
+}
+
+// Pager wiring (once, at module load).
+document.getElementById('productsPager')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-pg]');
+    if (!btn) return;
+    PRODUCTS_PAGE += (btn.dataset.pg === 'next' ? 1 : -1);
+    loadProducts();
+});
+
+// ---- Per-product detail page (child of Scans) ----
+
+function openProductDetail(name) {
+    // Switch panel + sidebar highlight, then render.
+    activatePanelDirect('product-detail', 'Product');
+    renderProductDetail(name);
+}
+
+function renderProductDetail(name) {
+    const p = PRODUCTS_CACHE.find(x => x.name === name);
+    if (!p) {
+        $('#pdName').textContent = name;
+        $('#pdSub').textContent  = '(not in current list — switch tab and back to refresh)';
+        $('#pdFlags').innerHTML  = '';
+        $('#pdActivity').textContent = '—';
+        return;
+    }
+    $('#pdName').textContent = p.name;
+    $('#pdSub').innerHTML = p.tracked
+        ? `Tracked · last seen ${escape(formatHumanTime(p.last_seen || ''))}`
+        : `<span style="color:var(--text-mute)">Untracked — alerts + autobuy suppressed</span>`;
+
+    const priceText = (p.price != null) ? `$${Number(p.price).toLocaleString(undefined, {maximumFractionDigits: 2})}` : '—';
+    const scrapedText = p.scraped_price != null ? `$${Number(p.scraped_price).toLocaleString()}` : '(hidden by Good360 from this account)';
+    const manualVal = p.manual_price != null ? p.manual_price : '';
+
+    $('#pdFlags').innerHTML = `
+        <div class="pd-grid">
+            <div class="pd-cell">
+                <div class="pd-label">Effective price</div>
+                <div class="pd-value mono">${priceText}</div>
+                <div class="pd-hint">${p.price_source === 'manual' ? 'using manual override' : (p.price_source === 'scraped' ? 'scraped from listing' : 'no price known')}</div>
+            </div>
+            <div class="pd-cell">
+                <div class="pd-label">Scraped price</div>
+                <div class="pd-value mono">${escape(scrapedText)}</div>
+            </div>
+            <div class="pd-cell">
+                <div class="pd-label">Manual price</div>
+                <input type="number" id="pdManualPrice" min="0" step="0.01"
+                       value="${manualVal}" placeholder="e.g. 4828.45"
+                       class="product-detail__price-input" data-name="${escape(name)}">
+                <div class="pd-hint">empty = clear override</div>
+            </div>
+            <div class="pd-cell">
+                <div class="pd-label">URL</div>
+                ${p.last_url ? `<a class="mono" href="${escape(p.last_url)}" target="_blank" rel="noopener" style="word-break:break-all">${escape(p.last_url)}</a>` : '<span class="mono" style="color:var(--text-mute)">—</span>'}
+            </div>
+            <div class="pd-cell">
+                <div class="pd-label">Tracked</div>
+                <button class="autobuy-toggle ${p.tracked ? 'on' : ''}" type="button"
+                        data-product-toggle="tracked" data-name="${escape(name)}">
+                    <span class="autobuy-toggle__track"><span class="autobuy-toggle__thumb"></span></span>
+                </button>
+            </div>
+            <div class="pd-cell">
+                <div class="pd-label">Autobuy</div>
+                <button class="autobuy-toggle ${p.autobuy_enabled ? 'on' : ''}" type="button"
+                        data-product-toggle="autobuy" data-name="${escape(name)}"
+                        ${p.tracked ? '' : 'disabled'}>
+                    <span class="autobuy-toggle__track"><span class="autobuy-toggle__thumb"></span></span>
+                </button>
+            </div>
+        </div>
+    `;
+
+    // Pre-fill description textarea
+    $('#pdDescription').value = p.description || '';
+    $('#pdDescription').dataset.name = p.name;
+
+    $('#pdActivity').innerHTML =
+        `<span class="mono" style="color:var(--text-dim)">${p.observations} observations · ${p.available_count} times available · first seen ${escape(p.first_seen || '—')}</span>`;
+}
+
+// Back button
+document.getElementById('pdBack')?.addEventListener('click', () => {
+    activatePanelDirect('scans', 'Scans');
+});
+
+// Detail-page interactions: the existing click + blur handlers already
+// fire on `[data-product-toggle]` (toggles) and `.product-detail__price-input`
+// + `.product-detail__textarea` selectors used here. Just wire the
+// description blur on the detail page.
+document.addEventListener('blur', async (e) => {
+    const ta = e.target;
+    if (ta && ta.id === 'pdDescription') {
+        try {
+            await api('/api/admin/scans/products/description', {
+                method: 'POST',
+                body: JSON.stringify({name: ta.dataset.name, description: ta.value.trim()}),
+            });
+        } catch (err) { console.error('[product-detail] description save failed', err); }
+    }
+}, true);
+
+// ---------------- Live View ----------------
+//
+// Right pane is a real <iframe> pointed at marketplace.good360.org.
+// Browser same-origin policy forbids the dashboard's JS from reading or
+// writing the iframe's DOM, so prefill cannot happen automatically. The
+// left pane shows the picked customer's checkout fields with click-to-copy
+// buttons; the operator pastes each value into the corresponding field
+// inside the iframe.
+
+const LIVE_STATE = {
+    customers: [],
+    selectedKey: null,
+    loadedOnce: false,
+};
+
+async function loadLiveView() {
+    if (!LIVE_STATE.loadedOnce) {
+        try {
+            const r = await api('/api/admin/live/customers').then(r => r.json());
+            LIVE_STATE.customers = r.data || [];
+            LIVE_STATE.loadedOnce = true;
+        } catch (e) {
+            console.error('[live] customers', e);
+            $('#liveCustomerList').innerHTML = '<div class="empty-state">Failed to load customers.</div>';
+            return;
+        }
+    }
+    renderLiveCustomers();
+    // Detect iframe load failure so we can warn the operator clearly.
+    const frame = $('#liveFrame');
+    if (frame) {
+        frame.addEventListener('load', () => setLiveStatus('ok', 'Frame loaded. If you see a blank page, Good360 may have blocked embedding — use "Open in new tab".'));
+        frame.addEventListener('error', () => setLiveStatus('err', 'Iframe failed to load.'));
+    }
+}
+
+function renderLiveCustomers() {
+    const q = ($('#liveCustomerSearch')?.value || '').trim().toLowerCase();
+    const filtered = q
+        ? LIVE_STATE.customers.filter(c =>
+            c.name.toLowerCase().includes(q) ||
+            (c.good360_email || '').toLowerCase().includes(q) ||
+            c.key.toLowerCase().includes(q))
+        : LIVE_STATE.customers;
+    const list = $('#liveCustomerList');
+    $('#liveCustomerCount').textContent =
+        `${filtered.length}/${LIVE_STATE.customers.length} customer${LIVE_STATE.customers.length === 1 ? '' : 's'}`;
+    if (!filtered.length) {
+        list.innerHTML = `<div class="empty-state">${q ? 'No matches.' : 'No customers configured.'}</div>`;
+        return;
+    }
+    list.innerHTML = '';
+    for (const c of filtered) {
+        const div = document.createElement('div');
+        div.className = 'liveview-customer' + (c.key === LIVE_STATE.selectedKey ? ' selected' : '');
+        div.dataset.key = c.key;
+        const last4 = c.card_last4 ? `··${escape(c.card_last4)}` : '(no card)';
+        div.innerHTML = `
+            <span class="liveview-customer-name">${escape(c.name)}</span>
+            <span class="liveview-customer-meta">${escape(c.good360_email || '—')} · ${last4}</span>
+        `;
+        div.addEventListener('click', () => selectLiveCustomer(c.key));
+        list.appendChild(div);
+    }
+}
+
+async function selectLiveCustomer(key) {
+    LIVE_STATE.selectedKey = key;
+    document.querySelectorAll('.liveview-customer').forEach(el => {
+        el.classList.toggle('selected', el.dataset.key === key);
+    });
+    const c = LIVE_STATE.customers.find(x => x.key === key);
+    if (!c) return;
+
+    // Fetch fuller detail (card / address / answers) lazily — the list
+    // endpoint only carries the summary fields.
+    let detail = c;
+    try {
+        const r = await api(`/api/admin/live/customer/${encodeURIComponent(key)}`).then(r => r.json());
+        if (r && r.data) detail = {...c, ...r.data};
+    } catch { /* fall back to whatever the summary had */ }
+
+    renderCustomerDetail(detail);
+    setLiveStatus('idle', `Customer: ${detail.name}. Click any value to copy it, then paste into the Good360 frame.`);
+}
+
+function renderCustomerDetail(c) {
+    const wrap = $('#liveCustomerDetail');
+    if (!wrap) return;
+    wrap.hidden = false;
+    const card = c.card || {};
+    const ans = c.checkout_answers || {};
+    const rows = [
+        ['email',       c.good360_email],
+        ['password',    c.good360_password],
+        ['card name',   card.name],
+        ['card #',      card.number],
+        ['expiry',      card.expiry],
+        ['cvv',         card.cvv],
+        ['first',       c.first_name || c.billing_first_name],
+        ['last',        c.last_name  || c.billing_last_name],
+        ['address',     c.billing_address_line1 || c.address_line1],
+        ['city',        c.billing_city  || c.city],
+        ['state',       c.billing_state || c.state],
+        ['zip',         c.billing_zip   || c.zip],
+        ['people',      ans.people_helped],
+        ['distrib.',    ans.distribution_method],
+        // Live-mode extras from the QuickBeed customers table — useful to
+        // have on the side even when no Good360 field maps 1:1.
+        ['contact',     c.contact_email],
+        ['phone',       c.contact_phone],
+        ['budget',      c.max_budget != null ? `$${c.max_budget}` : null],
+        ['pref. loc.',  c.preferred_location],
+        ['truck pref.', c.truck_selection],
+    ].filter(([, v]) => v != null && String(v).trim() !== '');
+
+    wrap.innerHTML = `<h3>${escape(c.name)}</h3>`
+        + rows.map(([label, value]) => `
+            <div class="liveview-copy-row" data-copy="${escape(String(value))}">
+                <span class="liveview-copy-row-label">${escape(label)}</span>
+                <span class="liveview-copy-row-value">${escape(String(value))}</span>
+                <span class="liveview-copy-row-hint">click to copy</span>
+            </div>`).join('');
+
+    wrap.querySelectorAll('.liveview-copy-row').forEach(row => {
+        row.addEventListener('click', async () => {
+            try {
+                await navigator.clipboard.writeText(row.dataset.copy);
+                row.classList.add('copied');
+                row.querySelector('.liveview-copy-row-hint').textContent = 'copied ✓';
+                setTimeout(() => {
+                    row.classList.remove('copied');
+                    row.querySelector('.liveview-copy-row-hint').textContent = 'click to copy';
+                }, 1500);
+            } catch (e) {
+                console.error('[live] copy failed', e);
+                alert('Clipboard copy failed — select the value manually.');
+            }
+        });
+    });
+}
+
+function setLiveStatus(kind, text) {
+    const el = $('#liveStatus');
+    if (!el) return;
+    el.className = 'liveview-status' + (kind ? ' ' + kind : '');
+    el.textContent = text;
+}
+
+// ---- Event wiring (module-load) ----
+
+document.addEventListener('input', (e) => {
+    if (e.target.id === 'liveCustomerSearch') renderLiveCustomers();
+});
+
+document.addEventListener('click', (e) => {
+    if (e.target.id === 'liveFrameGoBtn') {
+        const url = ($('#liveFrameUrl').value || '').trim();
+        if (/^https?:\/\//.test(url)) {
+            $('#liveFrame').src = url;
+            $('#liveFrameOpenBtn').href = url;
+            setLiveStatus('idle', `Loading ${url}…`);
+        } else {
+            setLiveStatus('err', 'URL must start with http:// or https://');
+        }
+    }
+});
+
+// ---------------- Screenshots (per-scan) ----------------
+
+// Lightbox displays whichever scan's list was last opened.
+let SHOT_ITEMS = [];     // current list for lightbox nav
+let SHOT_LB_INDEX = -1;
+
+// Cache of `{ scan_ts: [shot, ...] }` populated by loadScans.
+let SCAN_SHOT_BUCKETS = {};
+let SCAN_CAPTURE_BUCKETS = {};
+
+async function fetchScanShotBuckets() {
+    try {
+        const r = await api('/api/admin/screenshots/by-scan').then(r => r.json());
+        SCAN_SHOT_BUCKETS = r.buckets || {};
+    } catch (e) {
+        console.warn('[screenshots] failed to load buckets', e);
+        SCAN_SHOT_BUCKETS = {};
+    }
+}
+
+async function fetchScanCaptureBuckets() {
+    try {
+        const r = await api('/api/admin/scans/captures/by-scan').then(r => r.json());
+        SCAN_CAPTURE_BUCKETS = r.buckets || {};
+    } catch (e) {
+        console.warn('[captures] failed to load buckets', e);
+        SCAN_CAPTURE_BUCKETS = {};
+    }
+}
+
+function capturesForScan(scanKey) {
+    return SCAN_CAPTURE_BUCKETS[scanKey] || [];
+}
+
+function renderScanCaptureStrip(scanKey) {
+    const caps = capturesForScan(scanKey);
+    if (!caps.length) return '';
+    const rows = caps.map(c => {
+        const outcome = (c.outcome || '?').toUpperCase();
+        const cls = outcome === 'SUCCESS' ? 'ok'
+                  : outcome === 'MISSED'  ? 'warn'
+                  : outcome === 'MANUAL'  ? 'warn'
+                  : 'err';
+        return `<a class="scan-capture" target="_blank" rel="noopener"
+                   href="/api/admin/scans/captures/file?p=${encodeURIComponent(c.path)}">
+            <span class="pill ${cls}">${escape(outcome.toLowerCase())}</span>
+            <span class="scan-capture-meta">
+                <span class="mono">${escape(c.engine || 'script')}</span> ·
+                <span class="mono">${escape(c.name)}</span>
+            </span>
+            <span class="scan-capture-hint">view raw JSON ↗</span>
+        </a>`;
+    }).join('');
+    return `
+        <div class="scan-captures">
+            <div class="scan-captures-label">debug captures (${caps.length}) — network log, console, final URL, full HTML</div>
+            ${rows}
+        </div>
+    `;
+}
+
+function shotsForScan(scanKey) {
+    return SCAN_SHOT_BUCKETS[scanKey] || [];
+}
+
+function renderScanShotStrip(scanKey) {
+    const shots = shotsForScan(scanKey);
+    if (!shots.length) return '';
+    const items = shots.map((s, i) => `
+        <div class="shot-card" data-scan-key="${escape(scanKey)}" data-shot-idx="${i}">
+            <img loading="lazy" src="/api/admin/screenshots/file?p=${encodeURIComponent(s.path)}" alt="${escape(s.name)}">
+            <div class="shot-card-meta">
+                <span class="shot-card-name" title="${escape(s.name)}">${escape(s.name)}</span>
+                <span class="shot-card-sub">${escape(s.source)}</span>
+            </div>
+        </div>
+    `).join('');
+    return `
+        <div class="scan-shots">
+            <div class="scan-shots-label">screenshots (${shots.length})</div>
+            <div class="shot-grid">${items}</div>
+        </div>
+    `;
+}
+
+function openScanShot(scanKey, idx) {
+    SHOT_ITEMS = shotsForScan(scanKey);
+    openLightbox(idx);
+}
+
+// ---------------- Lightbox ----------------
+
+function openLightbox(idx) {
+    if (idx < 0 || idx >= SHOT_ITEMS.length) return;
+    SHOT_LB_INDEX = idx;
+    const item = SHOT_ITEMS[idx];
+    const url = `/api/admin/screenshots/file?p=${encodeURIComponent(item.path)}`;
+    $('#lbImg').src = url;
+    $('#lbImg').alt = item.name;
+    $('#lbName').textContent = item.name;
+    $('#lbSource').textContent = item.source;
+    $('#lbMtime').textContent = formatHumanTime(item.mtime);
+    $('#lbPos').textContent = `${idx + 1} of ${SHOT_ITEMS.length}`;
+    $('#lbPrev').disabled = idx === 0;
+    $('#lbNext').disabled = idx === SHOT_ITEMS.length - 1;
+    $('#lightbox').hidden = false;
+    document.body.style.overflow = 'hidden';
+}
+
+function closeLightbox() {
+    $('#lightbox').hidden = true;
+    $('#lbImg').src = '';
+    SHOT_LB_INDEX = -1;
+    document.body.style.overflow = '';
+}
+
+function navLightbox(delta) {
+    const next = SHOT_LB_INDEX + delta;
+    if (next < 0 || next >= SHOT_ITEMS.length) return;
+    openLightbox(next);
+}
+
+$('#lbClose').addEventListener('click', closeLightbox);
+$('#lbPrev').addEventListener('click', () => navLightbox(-1));
+$('#lbNext').addEventListener('click', () => navLightbox(1));
+$('#lightbox').addEventListener('click', (e) => {
+    // Backdrop click closes; clicks on the image/figcaption/nav buttons don't.
+    if (e.target.id === 'lightbox') closeLightbox();
+});
+document.addEventListener('keydown', (e) => {
+    if ($('#lightbox').hidden) return;
+    if (e.key === 'Escape') closeLightbox();
+    else if (e.key === 'ArrowLeft') navLightbox(-1);
+    else if (e.key === 'ArrowRight') navLightbox(1);
+});
+
+// ---------------- Live availability alert drawer ----------------
+//
+// Independent of any tab. Polls /api/admin/scans on its own clock (5s) so
+// alerts fire even when the operator is on the Customers or Purchases tab.
+// First-truck-seen wins: we only chime + drawer when a new tracked truck
+// transitions from not-seen → AVAILABLE. Status updates from subsequent
+// scans patch the existing card (so the chime doesn't repeat on every
+// refresh while the truck stays available).
+
+const ALERT_POLL_MS = 5000;
+const ALERT_AUTO_DISMISS_MS = 5 * 60 * 1000;   // 5 minutes
+const ALERT_SEEN = new Map();   // key: truck name → {firstSeen, lastStatus, scanTs}
+let _alertAudioCtx = null;
+let _alertHistoryStarted = false;
+
+function _alertPlayChime() {
+    if ($('#alertMute')?.checked) return;
+    try {
+        _alertAudioCtx = _alertAudioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        const ctx = _alertAudioCtx;
+        const now = ctx.currentTime;
+        // Two-tone attention chime: D5 then A5, 100ms each, exponential decay.
+        [ [587.33, now], [880, now + 0.12] ].forEach(([freq, t0]) => {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.value = freq;
+            gain.gain.setValueAtTime(0.0001, t0);
+            gain.gain.exponentialRampToValueAtTime(0.3, t0 + 0.01);
+            gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.25);
+            osc.connect(gain).connect(ctx.destination);
+            osc.start(t0);
+            osc.stop(t0 + 0.3);
+        });
+    } catch (e) { /* audio blocked until user gesture — silent fallback */ }
+}
+
+function _alertRender() {
+    const list = $('#alertDrawerList');
+    const drawer = $('#alertDrawer');
+    if (!list || !drawer) return;
+    list.innerHTML = '';
+    const items = Array.from(ALERT_SEEN.entries())
+        .map(([name, info]) => ({name, ...info}))
+        .sort((a, b) => b.firstSeen - a.firstSeen);
+    if (!items.length) {
+        drawer.classList.remove('has-items');
+        return;
+    }
+    drawer.classList.add('has-items');
+    for (const it of items) {
+        const card = document.createElement('div');
+        const statusKey = (it.lastStatus || '').toLowerCase();
+        const cls = statusKey.includes('success') ? ''
+                  : statusKey.includes('fail')    ? ' status-fail'
+                  : statusKey.includes('manual')  ? ' status-manual'
+                  : statusKey.includes('miss')    ? ' status-missed'
+                  : '';
+        card.className = 'alert-card' + cls;
+        card.dataset.name = it.name;
+        const truckUrl = it.url || 'https://catalog.good360.org/marketplace/browse-goods/truckload-donations/amazon.html';
+        card.innerHTML = `
+            <div class="alert-card-head">
+                <span class="alert-card-name">${escape(it.name)}</span>
+                <span class="alert-card-meta">${escape(formatHumanTime(new Date(it.firstSeen).toISOString()))}</span>
+            </div>
+            <div class="alert-card-status">${escape(it.lastStatus || 'available — autobuy in flight…')}</div>
+            <div class="alert-card-actions">
+                <a class="alert-card-buy" href="${escape(truckUrl)}" target="_blank" rel="noopener">Go Buy →</a>
+                <button class="alert-card-dismiss" type="button" data-alert-dismiss="${escape(it.name)}">dismiss</button>
+            </div>
+        `;
+        list.appendChild(card);
+    }
+}
+
+function _alertOnScans(scans) {
+    if (!scans || !scans.length) return;
+    const now = Date.now();
+    let triggeredChime = false;
+
+    // Walk newest → oldest so we always pick up the most recent status.
+    for (const s of scans) {
+        const trucks = s.trucks || [];
+        for (const t of trucks) {
+            if (!t.tracked || !t.available) continue;
+            const name = t.name;
+            const existing = ALERT_SEEN.get(name);
+            // Status hint from the scan's `action` field (set by monitor when
+            // autobuy runs). Falls back to a friendly message if blank.
+            const statusText = s.action || (existing && existing.lastStatus) || 'available — autobuy in flight…';
+            if (!existing) {
+                ALERT_SEEN.set(name, {
+                    firstSeen:  now,
+                    lastStatus: statusText,
+                    scanTs:     s.time,
+                    url:        t.url,
+                });
+                triggeredChime = true;
+            } else {
+                // Patch status from a later scan if it changed.
+                if (statusText && statusText !== existing.lastStatus) {
+                    existing.lastStatus = statusText;
+                }
+                if (t.url && !existing.url) existing.url = t.url;
+            }
+        }
+    }
+
+    // Auto-prune old cards that have been open >5min.
+    for (const [name, info] of ALERT_SEEN.entries()) {
+        if (now - info.firstSeen > ALERT_AUTO_DISMISS_MS) {
+            ALERT_SEEN.delete(name);
+        }
+    }
+
+    _alertRender();
+    if (triggeredChime && _alertHistoryStarted) _alertPlayChime();
+}
+
+async function _alertPoll() {
+    if (document.hidden) return;   // skip when the tab is in the background
+    try {
+        const r = await api('/api/admin/scans?limit=20').then(r => r.json());
+        const scans = (r?.data?.scans) || [];
+        _alertOnScans(scans);
+        // First poll: prime ALERT_SEEN with any existing in-flight
+        // availability events without chiming (we don't want a noisy
+        // re-chime on every page load).
+        if (!_alertHistoryStarted) _alertHistoryStarted = true;
+    } catch (e) {
+        // network blip — silent retry on the next tick
+    }
+}
+
+// Drawer wiring (runs once at module load).
+document.getElementById('alertDrawerClear')?.addEventListener('click', () => {
+    ALERT_SEEN.clear();
+    _alertRender();
+});
+document.getElementById('alertDrawerList')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-alert-dismiss]');
+    if (!btn) return;
+    ALERT_SEEN.delete(btn.dataset.alertDismiss);
+    _alertRender();
+});
+
+// Kick off the global poll. Independent of the Scans tab auto-refresh
+// so alerts fire on any tab the operator is on.
+_alertPoll();
+setInterval(_alertPoll, ALERT_POLL_MS);
+
 // ---------------- Helpers ----------------
 
 const loaders = {
@@ -2691,6 +4767,7 @@ const loaders = {
     users: loadUsers,
     settings: loadSettings,
     testbuy: loadTestBuy,
+    liveview: loadLiveView,
     audit: loadAudit,
     import: loadImport,
 };
