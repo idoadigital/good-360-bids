@@ -229,6 +229,20 @@ def check_lock_and_cooldown():
 # AUTO-BUY: Always active during monitoring hours
 MAX_AUTO_PAY = 6400.00
 
+# Re-alert cadence: while a tracked truck STAYS available, repeat the
+# availability alert this often (operator request 2026-06-12: never let a
+# standing truck go quiet). First-detection alerts and the single-shot
+# autobuy trigger are unaffected.
+AVAILABLE_REALERT_SECONDS = int(os.environ.get("AVAILABLE_REALERT_SECONDS", "30"))
+
+
+def _should_realert(state, name, now_ts):
+    """True when a still-available truck's last alert is older than
+    AVAILABLE_REALERT_SECONDS. Bookkeeping (writing the new timestamp)
+    stays at the call site."""
+    times = state.get("alert_times") or {}
+    return (now_ts - times.get(name, 0)) >= AVAILABLE_REALERT_SECONDS
+
 # ============================================================
 # IGNORED PRODUCTS (user-managed via dashboard's Scans tab)
 # ============================================================
@@ -1540,6 +1554,19 @@ def main():
                     _fire_and_forget("immediate-telegram", send_telegram_alert, [t],
                         extra_note="IMMEDIATE ALERT - Truck detected! Alert sent FIRST before auto-buy.")
                     log_cron(f"IMMEDIATE ALERT dispatched for {t['name']}")
+                    state.setdefault("alert_times", {})[t["name"]] = time.time()
+                elif _should_realert(state, t["name"], time.time()):
+                    # RE-ALERT: repeat every AVAILABLE_REALERT_SECONDS while
+                    # the truck stays available so the operator can't miss
+                    # it. Autobuy is NOT re-triggered here — it stays
+                    # single-shot per availability (see skill §2 re-arm).
+                    print(f"  [RE-ALERT] {t['name']} still available - re-dispatching alerts")
+                    _fire_and_forget("realert-email", send_alert_email, [t],
+                        extra_note="REMINDER: truck is STILL AVAILABLE.")
+                    _fire_and_forget("realert-telegram", send_telegram_alert, [t],
+                        extra_note="REMINDER - truck still available!")
+                    log_cron(f"RE-ALERT dispatched for {t['name']}")
+                    state.setdefault("alert_times", {})[t["name"]] = time.time()
 
                 log_cron(f"TRACKED TRUCK AVAILABLE: {t['name']}")
 
@@ -1554,6 +1581,12 @@ def main():
 
         still_available_names = [t["name"] for t in trucks if t["available"]]
         state["alerted"] = [name for name in state["alerted"] if name in still_available_names]
+        # Prune re-alert timestamps the same way so a truck that disappears
+        # and comes back gets a fresh immediate alert, not a stale clock.
+        if not isinstance(state.get("alert_times"), dict):
+            state["alert_times"] = {}
+        state["alert_times"] = {k: v for k, v in state["alert_times"].items()
+                                if k in still_available_names}
 
         alert_sent = False
         action_taken = ""
