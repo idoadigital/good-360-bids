@@ -2095,7 +2095,13 @@ def _roster_purchase_rows(where_sql: str = "", params: tuple = (), limit: int = 
     import sqlite3 as _sqlite
     if not os.path.exists(ROSTER_DB_PATH):
         return []
+    # The caller's `params` are bound FIRST, so the caller's where_sql
+    # clause must also come first — appending it after the date/q/customer
+    # clauses crossed the placeholders (the customer id ended up inside
+    # datetime('now', ?), silently matching nothing: empty buyer history).
     where_parts = ["1=1"]
+    if where_sql:
+        where_parts.append(where_sql)
     if since:
         where_parts.append("pa.started_at >= ?")
         params = (*params, since)
@@ -2116,8 +2122,6 @@ def _roster_purchase_rows(where_sql: str = "", params: tuple = (), limit: int = 
     if customer_id:
         where_parts.append("np.quickbeed_customer_id = ?")
         params = (*params, customer_id)
-    if where_sql:
-        where_parts.append(where_sql)
     where = " AND ".join(where_parts)
     sql = f"""
         SELECT
