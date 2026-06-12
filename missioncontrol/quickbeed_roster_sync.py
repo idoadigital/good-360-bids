@@ -14,6 +14,7 @@ import logging
 import os
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger("quickbeed_roster_sync")
@@ -120,6 +121,7 @@ def sync_to_roster() -> dict:
         ).fetchall()
 
     inserted = updated = 0
+    now_iso = datetime.utcnow().isoformat()
     with roster_conn() as rc:
         for cust in customers:
             roster_status = _STATUS_MAP.get(cust["status"], "pending_setup")
@@ -136,7 +138,14 @@ def sync_to_roster() -> dict:
                          contact_email = ?,
                          contact_phone = ?,
                          status = CASE
-                            WHEN status = 'cooldown' AND ? = 'active' THEN 'cooldown'
+                            -- Preserve a purchase cooldown across syncs, but
+                            -- ONLY while it is still in force: re-pinning an
+                            -- EXPIRED cooldown kept orgs invisible to the
+                            -- engine forever (Di'Marco incident 2026-06-12).
+                            WHEN status = 'cooldown'
+                                 AND cooldown_until IS NOT NULL
+                                 AND cooldown_until > ?
+                                 AND ? = 'active' THEN 'cooldown'
                             ELSE ?
                          END,
                          max_price_override = ?,
@@ -149,7 +158,7 @@ def sync_to_roster() -> dict:
                         cust["full_name"] or "—",
                         cust["email"] or "—",
                         cust["phone"] or "—",
-                        roster_status, roster_status,
+                        now_iso, roster_status, roster_status,
                         cust["max_budget"],
                         # The operator's dashboard rotation toggle must reach
                         # the purchase engine: QuickBeed-active alone is NOT

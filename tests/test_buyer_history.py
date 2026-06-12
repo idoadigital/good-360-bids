@@ -11,13 +11,17 @@ r.executescript("""
 CREATE TABLE purchase_attempts (id INTEGER PRIMARY KEY, truck_event_id INT,
   nonprofit_id INT, started_at TEXT, completed_at TEXT, status TEXT, mode TEXT,
   attempt_number INT, error_message TEXT, screenshot_path TEXT,
-  confirmation_number TEXT, order_total REAL, cooldown_applied INT);
+  confirmation_number TEXT, order_total REAL, cooldown_applied INT,
+  order_status TEXT, order_status_source TEXT, order_status_updated_at TEXT,
+  proof TEXT);
 CREATE TABLE truck_events (id INTEGER PRIMARY KEY, truck_title TEXT, truck_url TEXT, truck_price REAL);
 CREATE TABLE nonprofits (id INTEGER PRIMARY KEY, org_name TEXT, contact_email TEXT, quickbeed_customer_id TEXT);
 INSERT INTO nonprofits VALUES (6, 'Test Org', 'x@y.z', 'QB123');
 INSERT INTO truck_events VALUES (57, 'Test Truck', 'http://x', 0);
-INSERT INTO purchase_attempts VALUES (36, 57, 6, datetime('now','-1 hour'),
-  datetime('now'), 'success', 'auto_buy', 1, NULL, NULL, '100272562', NULL, 1);
+INSERT INTO purchase_attempts (id, truck_event_id, nonprofit_id, started_at,
+  completed_at, status, mode, attempt_number, confirmation_number, cooldown_applied)
+  VALUES (36, 57, 6, datetime('now','-1 hour'),
+  datetime('now'), 'success', 'auto_buy', 1, '100272562', 1);
 """)
 r.commit(); r.close()
 

@@ -2158,7 +2158,11 @@ def _roster_purchase_rows(where_sql: str = "", params: tuple = (), limit: int = 
         conn.row_factory = _sqlite.Row
         rows = conn.execute(sql, (*params, limit)).fetchall()
         conn.close()
-    except _sqlite.Error:
+    except _sqlite.Error as exc:
+        # Degrade to an empty list so the UI renders an empty state — but
+        # NEVER silently: a schema/locking error looks identical to "no
+        # purchases" otherwise (bit us on 2026-06-12).
+        print(f"[purchases] roster query failed, returning empty: {exc}", flush=True)
         return []
 
     out: list[dict] = []

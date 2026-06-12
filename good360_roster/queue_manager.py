@@ -87,6 +87,16 @@ def find_next_available_org(truck_category: str = None, truck_price: float = Non
     an ordering hint, never an eligibility bypass.
     Returns the org Row or None.
     """
+    # Release expired cooldowns AT THE POINT OF PICK. The background
+    # releaser only ran inside roster_orchestrator.run_daemon(), which is
+    # not a running process in this stack — orgs whose cooldown had lapsed
+    # stayed status='cooldown' forever and the engine skipped them (the
+    # Di'Marco incident, 2026-06-12). Doing it here guarantees the pick
+    # can never be based on stale cooldown state.
+    try:
+        check_and_release_expired_cooldowns()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"expired-cooldown sweep failed (pick continues): {e}")
     cooldown_days = get_cooldown_days()
     with get_db_connection() as conn:
         now = datetime.utcnow().isoformat()
