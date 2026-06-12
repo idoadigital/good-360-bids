@@ -1461,7 +1461,7 @@ function renderCustomers() {
         const msg = customers.length
             ? 'No customers match the current filters.'
             : 'No customers synced yet. Set QuickBeed credentials in Settings, then click "Resync now".';
-        tb.innerHTML = `<tr><td colspan="7"><div class="empty-state">${msg}</div></td></tr>`;
+        tb.innerHTML = `<tr><td colspan="8"><div class="empty-state">${msg}</div></td></tr>`;
         $('#custPager').hidden = true;
         return;
     }
@@ -1487,6 +1487,7 @@ function renderCustomers() {
             // Optimistic visual flip for snappy UX; revert on error.
             applyToggleState(btn, turningOn);
             btn.disabled = true;
+            btn.classList.add('saving');
             try {
                 const res = await api(`/api/admin/customers/${encodeURIComponent(customerId)}/rotation`, {
                     method: 'PATCH',
@@ -1502,6 +1503,7 @@ function renderCustomers() {
                 alert('Network error: ' + (e?.message || e));
             } finally {
                 btn.disabled = false;
+                btn.classList.remove('saving');
             }
         }, true);   // capture phase
     }
@@ -1526,8 +1528,9 @@ function renderCustomers() {
                 <div style="font-weight:500">${escape(c.organization_name || '—')}</div>
                 <div style="font-family:var(--font-mono);font-size:11px;color:var(--text-mute)">${escape(c.full_name || '')} · ${escape(c.email || '')}</div>
             </td>
-            <td data-label="Status"><span class="pill ${pillClass(c.status)}">${escape(c.status)}</span></td>
+            <td data-label="Status"><span class="pill ${pillClass(c.status)}">${escape(c.status)}</span>${dataReadinessBadge(c)}</td>
             <td data-label="Autobuy">${toggleHtml}</td>
+            <td data-label="Card" title="click row for full card details">${cardCell(c)}</td>
             <td class="mono" data-label="Priority">${escape(c.priority_level || '—')}</td>
             <td class="num" data-label="Max budget">${c.max_budget != null ? '$' + Number(c.max_budget).toLocaleString() : '—'}</td>
             <td class="mono" data-label="Last used">${escape(c.last_used_at || '—')}</td>
@@ -1612,6 +1615,7 @@ $('#cdAutobuyToggle')?.addEventListener('click', async (ev) => {
     const turningOn = !wasOn;
     applyToggleState(btn, turningOn);
     btn.disabled = true;
+    btn.classList.add('saving');
     try {
         const res = await api(`/api/admin/customers/${encodeURIComponent(customerId)}/rotation`, {
             method: 'PATCH',
@@ -1630,6 +1634,7 @@ $('#cdAutobuyToggle')?.addEventListener('click', async (ev) => {
         alert('Network error: ' + (e?.message || e));
     } finally {
         btn.disabled = false;
+        btn.classList.remove('saving');
     }
 });
 
@@ -1719,6 +1724,8 @@ async function loadCustomerDetail(id) {
     _resetCredRow('username');
     _resetCredRow('password');
     $('#cdCards').innerHTML = `<em style="color:var(--text-mute)">hidden — click "Show full record"</em>`;
+    const valBox = $('#cdCardValidation');
+    if (valBox) { valBox.hidden = true; valBox.innerHTML = ''; }
     $('#cdAcks').innerHTML = `<dt><em style="color:var(--text-mute)">live fetch only</em></dt><dd></dd>`;
     $('#cdCredsSub').textContent = 'click the eye to reveal — every reveal is audit-logged';
     $('#cdCardsSub').textContent = 'card numbers and CVVs are masked even after reveal';
@@ -1756,7 +1763,22 @@ async function loadCustomerDetail(id) {
     $('#cdBudget').textContent = c.max_budget != null ? '$' + Number(c.max_budget).toLocaleString() : '—';
     $('#cdPriority').textContent = c.priority_level || '—';
     $('#cdLastUsed').textContent = c.last_used_at ? formatRelTime(secondsSince(c.last_used_at)) + ' ago' : 'never';
-    $('#cdCooldown').textContent = c.cooldown_until ? `cooldown until ${c.cooldown_until}` : 'no cooldown';
+    const cdCool = $('#cdCooldown');
+    if (c.cooldown_until) {
+        cdCool.innerHTML = `cooldown until ${escape(c.cooldown_until)}
+            <button id="cdClearCooldown" class="btn btn-ghost super-only" type="button"
+                    title="Clear cooldown — customer re-enters the queue immediately"
+                    style="font-size:11px;padding:2px 10px;margin-left:6px">✕ clear</button>`;
+        $('#cdClearCooldown')?.addEventListener('click', async (ev) => {
+            const btn = ev.currentTarget;   // capture: currentTarget is null after await
+            btn.disabled = true;
+            const ok = await clearCustomerCooldown(c.id, c.organization_name || c.full_name);
+            if (ok) loadCustomerDetail(c.id);
+            else btn.disabled = false;
+        });
+    } else {
+        cdCool.textContent = 'no cooldown';
+    }
     $('#cdSynced').textContent = c.last_synced_at ? formatRelTime(secondsSince(c.last_synced_at)) + ' ago' : 'never';
     $('#cdUpdated').textContent = c.updated_at ? `updated ${c.updated_at}` : '';
 
@@ -1864,6 +1886,102 @@ async function revealFullRecord() {
 }
 
 document.getElementById('cdRevealBtn')?.addEventListener('click', revealFullRecord);
+
+// ---- Card details: full reveal + resync-and-validate ----------------
+
+function renderCardValidation(v) {
+    const box = $('#cdCardValidation');
+    if (!box || !v) return;
+    box.hidden = false;
+    if (v.ok) {
+        const warns = (v.warnings || []).length
+            ? `<div style="margin-top:6px;color:var(--text-dim);font-size:12px">warnings: ${v.warnings.map(escape).join(' · ')}</div>`
+            : '';
+        box.innerHTML = `<span class="pill ok">✓ all data points present — payment can succeed</span>${warns}`;
+    } else {
+        box.innerHTML = `
+            <span class="pill err">✗ payment would fail — data missing</span>
+            <ul style="margin:8px 0 0 18px;color:var(--err);font-size:12.5px">
+                ${v.blockers.map(b => `<li>${escape(b)}</li>`).join('')}
+            </ul>
+            <div style="margin-top:6px;color:var(--text-dim);font-size:12px">fix the record in QuickBeed, then click "Resync &amp; validate"</div>`;
+    }
+}
+
+async function revealCardDetails() {
+    if (!_currentCustomerId) return;
+    const btn = $('#cdCardRevealBtn');
+    if (btn) { btn.disabled = true; btn.dataset.orig = btn.textContent; btn.textContent = '… loading'; }
+    try {
+        const r = await api(`/api/admin/customers/${encodeURIComponent(_currentCustomerId)}/card-details?reason=support_investigation`)
+                    .then(r => r.json());
+        if (!r.success) {
+            $('#cdCardsSub').textContent = 'card reveal failed: ' + (r.error || 'unknown');
+            return;
+        }
+        const d = r.data;
+        $('#cdCardsSub').innerHTML = `FULL details shown (audit-logged · reason=<code class="mono">${escape(d._reason_logged)}</code>)`;
+        const cards = d.cards || [];
+        if (!cards.length) {
+            $('#cdCards').innerHTML = `<em style="color:var(--text-mute)">no payment methods on file</em>`;
+        } else {
+            $('#cdCards').innerHTML = cards.map(pm => {
+                const billing = pm.billing_address || {};
+                const grouped = (pm.card_number || '').replace(/(.{4})/g, '$1 ').trim();
+                const exp = pm.expiry_normalized
+                    ? pm.expiry_normalized.slice(0, 2) + '/' + pm.expiry_normalized.slice(2)
+                    : `<span class="pill err" title="stored as exp_month=${escape(String(pm.exp_month))}, exp_year=${escape(String(pm.exp_year))}">unreadable</span>`;
+                return `
+                <div style="border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:10px">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                        <strong>${escape(pm.rank || 'card')}</strong>
+                        <span class="pill idle">${escape(pm.network || '?')}</span>
+                    </div>
+                    <dl class="kv-grid">
+                        <dt>Type</dt><dd>${escape(pm.type || '—')}</dd>
+                        <dt>Name on card</dt><dd>${escape(pm.name_on_card || '—')}</dd>
+                        <dt>Card number</dt><dd class="mono">${escape(grouped) || '—'}</dd>
+                        <dt>CVV</dt><dd class="mono">${escape(pm.cvv || '—')}</dd>
+                        <dt>Expires</dt><dd class="mono">${exp}</dd>
+                        <dt>Billing</dt><dd>${[billing.street, billing.city, billing.state, billing.zip].filter(Boolean).map(escape).join(', ') || '—'}</dd>
+                    </dl>
+                </div>`;
+            }).join('');
+        }
+        renderCardValidation(d.validation);
+    } catch (e) {
+        $('#cdCardsSub').textContent = 'card reveal failed: ' + (e?.message || e);
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = btn.dataset.orig || 'Reveal card details'; }
+    }
+}
+
+async function resyncCustomerData() {
+    if (!_currentCustomerId) return;
+    const id = _currentCustomerId;
+    const btn = $('#cdCardResyncBtn');
+    if (btn) { btn.disabled = true; btn.dataset.orig = btn.textContent; btn.textContent = '… resyncing from QuickBeed'; }
+    try {
+        const r = await api(`/api/admin/customers/${encodeURIComponent(id)}/revalidate`, {method: 'POST'})
+                    .then(r => r.json());
+        if (!r.success) {
+            alert('Resync failed: ' + (r.error || 'unknown'));
+            return;
+        }
+        // Refresh the mirror-backed sections first (this resets the
+        // validation box), THEN render the fresh verdict on top.
+        await loadCustomerDetail(id);
+        renderCardValidation(r.validation);
+        loadCustomers().catch(() => {});   // keep the list's card/flag cells fresh
+    } catch (e) {
+        alert('Resync failed: ' + (e?.message || e));
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = btn.dataset.orig || 'Resync & validate'; }
+    }
+}
+
+document.getElementById('cdCardRevealBtn')?.addEventListener('click', revealCardDetails);
+document.getElementById('cdCardResyncBtn')?.addEventListener('click', resyncCustomerData);
 
 // ---- Test Buy modal -------------------------------------------------
 // Per-customer manual test purchase. Opens a modal, lets the operator
@@ -2984,16 +3102,51 @@ function renderRoster(d) {
         $('#rosterLast').innerHTML = `<span class="roster-empty">No purchases on record yet</span>`;
     }
 
-    // Cool-off — list of customers with active cooldown_until
+    // Cool-off — list of customers with active cooldown_until. Each chip
+    // gets a manual-override button so the operator can graduate the
+    // customer back into the queue without waiting out the timer.
+    const rosterCool = $('#rosterCool');
     if (cool.length) {
-        $('#rosterCool').innerHTML = cool.map(c => {
+        rosterCool.innerHTML = cool.map(c => {
             const until = c.cooldown_until;
             const remaining = until ? Math.max(0, secondsUntil(until)) : 0;
             const label = remaining > 0 ? `${formatRelTime(remaining)} left` : 'expired';
-            return customerChip(c, {accent: 'warn', extra: label, tooltip: until});
+            return `<span style="display:inline-flex;align-items:center;gap:4px">
+                ${customerChip(c, {accent: 'warn', extra: label, tooltip: until})}
+                <button class="btn btn-ghost cooldown-clear" type="button"
+                        data-customer-id="${escape(c.id)}" data-customer-name="${escape(shortName(c))}"
+                        title="Clear cooldown — customer re-enters the queue immediately"
+                        style="font-size:10px;padding:2px 8px">✕ clear</button>
+            </span>`;
         }).join('');
     } else {
-        $('#rosterCool').innerHTML = `<span class="roster-empty">Nobody cooling off</span>`;
+        rosterCool.innerHTML = `<span class="roster-empty">Nobody cooling off</span>`;
+    }
+    if (rosterCool && !rosterCool._cooldownDelegated) {
+        rosterCool._cooldownDelegated = true;
+        rosterCool.addEventListener('click', async (ev) => {
+            const btn = ev.target.closest('.cooldown-clear');
+            if (!btn || btn.disabled) return;
+            btn.disabled = true;
+            const ok = await clearCustomerCooldown(btn.dataset.customerId, btn.dataset.customerName);
+            btn.disabled = false;
+            if (ok) loadScans().catch(() => {});
+        });
+    }
+}
+
+async function clearCustomerCooldown(customerId, name) {
+    // Manual override: graduate a customer out of cooldown right now.
+    if (!confirm(`Clear cooldown for ${name || 'this customer'}?\n\nThey re-enter the autobuy queue immediately and can be assigned the next available truck.`)) return false;
+    try {
+        const r = await api(`/api/admin/customers/${encodeURIComponent(customerId)}/cooldown`, {method: 'DELETE'})
+                    .then(r => r.json());
+        if (!r.success) { alert(r.error || 'failed to clear cooldown'); return false; }
+        loadCustomers().catch(() => {});
+        return true;
+    } catch (e) {
+        alert('Network error: ' + (e?.message || e));
+        return false;
     }
 }
 
@@ -4015,7 +4168,7 @@ async function loadProducts() {
                         data-product-toggle="autobuy" data-name="${escape(p.name)}"
                         aria-pressed="${p.autobuy_enabled ? 'true' : 'false'}"
                         ${p.tracked ? '' : 'disabled'}
-                        title="${p.autobuy_enabled ? 'Autobuy on' : 'Autobuy off — alert only'}">
+                        title="${!p.tracked ? 'Unavailable — turn on Tracked first to enable autobuy' : (p.autobuy_enabled ? 'Autobuy on' : 'Autobuy off — alert only')}">
                     <span class="autobuy-toggle__track"><span class="autobuy-toggle__thumb"></span></span>
                 </button>
             </td>
@@ -4075,6 +4228,7 @@ async function _toggleProduct(btn, kind) {
     const name = btn.dataset.name;
     const nextState = !btn.classList.contains('on');
     btn.disabled = true;
+    btn.classList.add('saving');
     try {
         let url, body;
         if (kind === 'tracked') {
@@ -4111,6 +4265,7 @@ async function _toggleProduct(btn, kind) {
         console.error('[products] toggle failed', e);
     } finally {
         btn.disabled = false;
+        btn.classList.remove('saving');
     }
 }
 
@@ -4771,6 +4926,32 @@ const loaders = {
     audit: loadAudit,
     import: loadImport,
 };
+
+function cardCell(c) {
+    // customers.cards_meta: JSON [{rank,network,last4,expiry,usable}] refreshed
+    // on every full fetch / sweep. null = no full fetch yet.
+    let meta = null;
+    try { meta = c.cards_meta ? JSON.parse(c.cards_meta) : null; } catch { /* fall through */ }
+    if (!meta) return `<span style="color:var(--text-mute)">not checked</span>`;
+    if (!meta.length) return `<span class="pill err">no card</span>`;
+    const primary = meta.find(m => m.rank === 'primary') || meta[0];
+    const extra = meta.length > 1 ? ` <span class="pill idle" title="${meta.length - 1} fallback card(s)">+${meta.length - 1}</span>` : '';
+    const anyUsable = meta.some(m => m.usable);
+    const warn = anyUsable ? '' : ` <span class="pill err" title="no usable card — payment would fail">⚠</span>`;
+    return `<span class="mono">${escape(primary.network || 'card')} ••${escape(primary.last4 || '????')}</span>${extra}${warn}`;
+}
+
+function dataReadinessBadge(c) {
+    // customers.data_ok: null/undefined = never checked, 0 = flagged, 1 = ok.
+    if (c.data_ok !== 0) return '';
+    let issues = null;
+    try { issues = c.data_issues ? JSON.parse(c.data_issues) : null; } catch { /* raw text below */ }
+    const blockers = issues?.blockers || [];
+    const tip = blockers.length
+        ? `Auto-buy would fail — missing data:\n• ${blockers.join('\n• ')}`
+        : 'Customer record incomplete — auto-buy would fail';
+    return ` <span class="pill err" title="${escape(tip)}">⚠ data</span>`;
+}
 
 function pillClass(status) {
     if (!status) return 'idle';

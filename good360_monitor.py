@@ -719,10 +719,12 @@ def send_telegram(message):
     last_err = None
 
     targets = list(ALL_TELEGRAM_GROUPS)
-    if not targets:
-        op = (os.environ.get("TELEGRAM_OPERATOR_CHAT_ID") or "").strip()
-        if op:
-            targets = [op]
+    # The operator chat ALWAYS gets a copy — org groups alone meant the
+    # operator never saw truck detections in their own chat and assumed
+    # Telegram was broken (2026-06-12).
+    op = (os.environ.get("TELEGRAM_OPERATOR_CHAT_ID") or "").strip()
+    if op and op not in targets:
+        targets.append(op)
     if not targets:
         print("Telegram: no chat IDs configured (set TELEGRAM_GROUP_<ORG> or TELEGRAM_OPERATOR_CHAT_ID)")
         return
@@ -1474,12 +1476,21 @@ def main():
         print("Found " + str(len(trucks)) + " trucks:")
         for t in trucks:
             status = "AVAILABLE" if t["available"] else "Not available"
-            tracked = "[TRACKED]" if t["tracked"] else "[skipped]"
-            print("  " + tracked + " " + t["name"] + " -> " + status)
             # --- Enhanced truck classification rules ---
+            # The operator's Tracked toggle (Mission Control → Scans →
+            # Observed products) is authoritative in BOTH directions: it can
+            # rescue a truck the keyword rules exclude (e.g. Softlines) and
+            # silence one they track. The keyword rules below only decide
+            # trucks that have no dashboard row yet (first sighting).
             name_lower = t['name'].lower()
-            if 'softline' in name_lower:
-                t['tracked'] = False  # exclude softline
+            db_tracked, _db_autobuy_unused = get_product_db_flags(t['name'])
+            if db_tracked is not None:
+                if bool(db_tracked) != t['tracked']:
+                    log_cron(f'  [OPERATOR OVERRIDE] dashboard toggle wins for '
+                             f'{t["name"]}: tracked={"on" if db_tracked else "off"}')
+                t['tracked'] = bool(db_tracked)
+            elif 'softline' in name_lower:
+                t['tracked'] = False  # exclude softline by default
                 log_cron(f'  [EXCLUDED] Softline truck skipped: {t["name"]}')
             elif 'fulfillment center' in name_lower:
                 t['tracked'] = True
@@ -1491,6 +1502,8 @@ def main():
                 log_cron(f'  [ALERT-ONLY] FC/NC type truck tracked: {t["name"]}')
             # keep existing Unsorted / Variety / Houseware tracking
             # -----------------------------------------------------
+            tracked = "[TRACKED]" if t["tracked"] else "[skipped]"
+            print("  " + tracked + " " + t["name"] + " -> " + status)
             if t["tracked"] and t["available"]:
                 # IMMEDIATE ALERT: Send the INSTANT truck is detected.
                 # Fire-and-forget — the autobuy attempt that follows must not

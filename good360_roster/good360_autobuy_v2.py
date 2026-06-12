@@ -124,6 +124,7 @@ class OrgContext:
     payment_methods: list[dict] = field(default_factory=list)
     category_prefs: dict[str, dict] = field(default_factory=dict)
     checkout_answers: dict[str, str] = field(default_factory=dict)
+    billing_address: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -254,6 +255,7 @@ def _load_org_context_quickbeed(org_row, quickbeed_customer_id: str,
         payment_methods=payment_methods,
         category_prefs={},
         checkout_answers=cfg.get("checkout_answers") or {},
+        billing_address=cfg.get("billing_address") or {},
     ))
 
 
@@ -586,6 +588,25 @@ def _run_checkout_via_devtools_mcp(org: OrgContext, truck: TruckContext,
     order_total  = getattr(agent_result, "order_total", None)
 
     if a_status == "SUCCESS":
+        # PROOF REQUIRED: on 2026-06-12 the agent reported SUCCESS with no
+        # confirmation number for an order that never existed on Good360 —
+        # the system then marked the truck purchased, emailed the customer
+        # "Purchase Confirmed", and applied a 7-day cooldown, all on a
+        # fabricated claim. A success without a confirmation number is
+        # treated as a FAILURE so no downstream side effect can fire on an
+        # unproven purchase.
+        if not (confirmation and str(confirmation).strip()):
+            logger.error(
+                "[MCP] agent claimed SUCCESS without a confirmation number — "
+                "treating as failed_checkout (org=%s truck=%s). Agent message: %s",
+                org.org_id, truck.truck_event_id, a_msg)
+            return CheckoutResult(
+                success=False, status="failed_checkout", mode="auto_buy",
+                order_total=order_total,
+                error_message=("[MCP] UNVERIFIED SUCCESS REJECTED: agent reported "
+                               "success but provided no order confirmation number. "
+                               f"Agent message: {a_msg}"),
+            )
         return CheckoutResult(
             success=True, status="success", mode="auto_buy",
             confirmation_number=confirmation,
@@ -614,6 +635,113 @@ def _run_checkout_via_devtools_mcp(org: OrgContext, truck: TruckContext,
                              error_message=f"[MCP] BLOCKED: {a_msg}")
     return CheckoutResult(success=False, status="failed_checkout", mode="auto_buy",
                          error_message=f"[MCP] {a_status}: {a_msg}")
+
+
+def _run_checkout_via_daemon(org: OrgContext, truck: TruckContext,
+                             payment_card: dict,
+                             *, test_mode: bool = False) -> CheckoutResult:
+    """Deterministic checkout via the daemon's Playwright executor
+    (good360_daemon.py::_checkout_inner) — the path verified end-to-end with
+    screenshots and an evidence-based success heuristic (URL change, order-#
+    regex, explicit thank-you text). Replaces the LLM agent as the default
+    engine after the 2026-06-12 incident where the agent fabricated a SUCCESS
+    for an order that was never placed.
+    """
+    import requests as _requests
+
+    daemon_url = (os.environ.get("DAEMON_INTERNAL_URL") or "http://daemon:5002").rstrip("/")
+    expiry_mmyy = f"{int(payment_card['card_expiry_month']):02d}{str(payment_card['card_expiry_year'])[-2:]}"
+
+    primary_addr = next((a for a in org.addresses if a.get("is_primary")), None) \
+                   or (org.addresses[0] if org.addresses else {})
+    warehouse_address = (
+        primary_addr.get("address1")
+        or primary_addr.get("address")
+        or primary_addr.get("address_line")
+        or " ".join(p for p in (
+            primary_addr.get("street_line1"),
+            primary_addr.get("street_line2"),
+            primary_addr.get("city"),
+            primary_addr.get("state"),
+            primary_addr.get("zip_code"),
+        ) if p)
+        or ""
+    )
+
+    name_on_card = payment_card.get("card_holder_name") or org.contact_name or org.org_name
+    name_parts = (name_on_card or "").split()
+    billing = dict(org.billing_address or {})
+    if not billing.get("postcode"):
+        billing["postcode"] = (payment_card.get("billing_zip") or "").strip()
+    billing.setdefault("firstname", name_parts[0] if name_parts else "")
+    billing.setdefault("lastname", " ".join(name_parts[1:]) if len(name_parts) > 1 else "")
+    billing.setdefault("telephone", org.phone_number or "")
+
+    answers = dict(org.checkout_answers or {})
+    answers.setdefault("warehouse_address", warehouse_address)
+
+    org_config = {
+        "name":              org.org_name,
+        "good360_email":     org.good360_email,
+        "good360_password":  org.good360_password,
+        "card": {
+            "name":   name_on_card,
+            "number": payment_card["card_number"],
+            "expiry": expiry_mmyy,
+            "cvv":    payment_card.get("card_cvv"),
+            "type":   payment_card.get("card_type") or "visa",
+        },
+        "billing_address":   billing,
+        "checkout_answers":  answers,
+        "warehouse_address": warehouse_address,
+        "contact_name":      org.contact_name or "",
+        "contact_phone":     org.phone_number or "",
+    }
+
+    logger.info("[DAEMON] dispatching deterministic checkout · org=%s truck=%s card=****%s",
+                org.org_id, truck.truck_event_id, str(payment_card["card_number"])[-4:])
+    try:
+        resp = _requests.post(f"{daemon_url}/test_checkout", json={
+            "org_key": f"qb_{org.org_id}",
+            "org_config": org_config,
+            "truck_name": truck.truck_title,
+            "truck_url": truck.truck_url,
+            "force_login": True,
+        }, timeout=420)
+        payload = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        return CheckoutResult(
+            success=False, status="failed_checkout", mode="auto_buy",
+            error_message=f"[DAEMON] checkout dispatch failed: {type(exc).__name__}: {exc}")
+
+    d_status = (payload.get("status") or "").upper()
+    d_msg = payload.get("message") or ""
+    capture = payload.get("capture_path") or ""
+    suffix = f" (capture: {capture})" if capture else ""
+
+    if d_status == "SUCCESS":
+        # The daemon's SUCCESS is page-evidence-based (success URL, order-#
+        # regex, or explicit thank-you text) and screenshotted. Prefer the
+        # extracted order number; fall back to the evidence detail string.
+        import re as _re
+        m = _re.search(r"#=\s*([^,)]+)", d_msg)
+        conf = (m.group(1).strip() if m else "") or d_msg[:140]
+        return CheckoutResult(
+            success=True, status="success", mode="auto_buy",
+            confirmation_number=conf,
+            order_total=float(truck.truck_price) if truck.truck_price else None,
+            error_message=None)
+    if d_status == "CARD_DECLINED":
+        return CheckoutResult(success=False, status="failed_checkout", mode="auto_buy",
+                              error_message=f"[DAEMON] card declined: {d_msg}{suffix}")
+    if d_status == "MISSED":
+        return CheckoutResult(success=False, status="truck_gone", mode="auto_buy",
+                              error_message=f"[DAEMON] {d_msg}{suffix}")
+    if d_status == "MANUAL":
+        return CheckoutResult(success=False, status="alerted_manual", mode="auto_buy",
+                              error_message=f"[DAEMON] needs review: {d_msg}{suffix}")
+    return CheckoutResult(success=False, status="failed_checkout", mode="auto_buy",
+                          error_message=f"[DAEMON] {d_status or 'error'}: {d_msg}{suffix}")
 
 
 def run_checkout_sequence(org: OrgContext, truck: TruckContext,
@@ -660,11 +788,16 @@ def run_checkout_sequence(org: OrgContext, truck: TruckContext,
             error_message=None,
         )
 
-    # Production checkout via Chrome DevTools MCP agent. There is no
-    # fallback: the previous browser_agent path imported a module that no
-    # longer ships in the image, so any "fallback" was guaranteed to crash.
-    # If MCP is unavailable we surface that as a failed_checkout with a
-    # clear error_message so the operator notices and re-installs the SDK.
+    # Engine selection. Default is the deterministic daemon/Playwright
+    # executor — after 2026-06-12, when the LLM devtools agent fabricated
+    # refusals AND a success-for-an-order-that-never-existed, the LLM was
+    # demoted to an explicit opt-in via AUTOBUY_ENGINE=devtools_agent.
+    engine = (os.environ.get("AUTOBUY_ENGINE") or "daemon").strip().lower()
+    if engine != "devtools_agent":
+        return _run_checkout_via_daemon(org, truck, payment_card, test_mode=test_mode)
+
+    # LLM agent path (opt-in). If MCP is unavailable we surface that as a
+    # failed_checkout with a clear error_message so the operator notices.
     try:
         return _run_checkout_via_devtools_mcp(org, truck, payment_card, test_mode=test_mode)
     except _DevToolsMCPUnavailable as exc:
@@ -860,6 +993,84 @@ def handle_master_card_fallback(org: OrgContext, truck: TruckContext,
 
 
 # ─── Main Purchase Flow ───────────────────────────────────────────────────────
+def _live_purchase_approval_blocker(org_id: int) -> str | None:
+    """Defense-in-depth gate for LIVE purchases. Returns a refusal reason,
+    or None when the purchase is approved.
+
+    Whatever upstream queue selected this org, the purchase is only allowed
+    when the dashboard mirror — the operator's source of truth — says the
+    customer is BOTH QuickBeed-active AND toggled into rotation. Added after
+    the 2026-06-11 incident where a roster-sync bug let the engine attempt a
+    purchase for a customer the operator had removed from rotation.
+
+    FAIL CLOSED: any error verifying approval refuses the purchase.
+    """
+    try:
+        with get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT quickbeed_customer_id, org_name FROM nonprofits WHERE id = ?",
+                (org_id,)).fetchone()
+        if not row:
+            return f"org {org_id} not found in roster"
+        keys = row.keys() if hasattr(row, "keys") else []
+        qb_id = row["quickbeed_customer_id"] if "quickbeed_customer_id" in keys else None
+        if not qb_id:
+            return (f"org {org_id} ({row['org_name']}) has no QuickBeed customer id — "
+                    "live purchases are only allowed for roster customers synced from QuickBeed")
+
+        import sys as _sys
+        if "/app/missioncontrol" not in _sys.path:
+            _sys.path.insert(0, "/app/missioncontrol")
+        from db import get_conn as _dash_conn  # type: ignore
+        with _dash_conn() as c:
+            cust = c.execute(
+                "SELECT status, in_rotation, organization_name FROM customers WHERE id = ?",
+                (qb_id,)).fetchone()
+        if not cust:
+            return f"QuickBeed customer {qb_id} not in the dashboard mirror — cannot verify approval"
+        name = cust["organization_name"] or qb_id
+        if (cust["status"] or "") != "active":
+            return f"customer {name!r} has status={cust['status']!r} (not active)"
+        if int(cust["in_rotation"] or 0) != 1:
+            return f"customer {name!r} is NOT in rotation — operator has not approved autobuy for this account"
+        return None
+    except Exception as e:  # noqa: BLE001
+        return (f"approval check failed ({type(e).__name__}: {e}) — "
+                "refusing to purchase (fail-closed)")
+
+
+def _alert_blocked_purchase(org_name: str, truck_title: str, reason: str) -> None:
+    """Telegram the operator that the approval gate refused a purchase.
+    A trip of this gate means an upstream selection bug — it must be loud."""
+    import html as _html
+    import requests as _requests
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat = (os.environ.get("TELEGRAM_OPERATOR_CHAT_ID") or "").strip()
+    msg = ("🚫 <b>PURCHASE BLOCKED — approval gate</b>\n"
+           f"Org: <b>{_html.escape(str(org_name))}</b>\n"
+           f"Truck: {_html.escape(str(truck_title))}\n"
+           f"Reason: {_html.escape(str(reason))}\n"
+           "The purchase engine refused to buy for a customer the dashboard "
+           "does not approve. Investigate how this org was selected.")
+    if token and chat:
+        try:
+            _requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat, "text": msg, "parse_mode": "HTML",
+                      "disable_web_page_preview": True},
+                timeout=10)
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        import notifications_log
+        notifications_log.record_telegram(
+            source="autobuy_approval_gate", message=msg, delivered=bool(token and chat),
+            channel="operator", level="error",
+            title=f"Purchase blocked: {org_name}")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def attempt_purchase(org_id: int, truck_event_id: int,
                      *, test_card_override: dict | None = None) -> CheckoutResult:
     """
@@ -896,6 +1107,20 @@ def attempt_purchase(org_id: int, truck_event_id: int,
         logger.error(f"Context load failed: {e}")
         return CheckoutResult(success=False, status="failed_checkout",
                              mode="auto_buy", error_message=str(e))
+
+    # HARD GATE: live purchases only for customers the operator has approved
+    # (dashboard: status=active AND in_rotation=1). This runs at the point of
+    # purchase regardless of which queue selected the org — a selection-layer
+    # bug must never be able to reach a checkout. Test mode (fake decline
+    # card, operator-initiated, no charge possible) bypasses it.
+    if not test_mode:
+        blocker = _live_purchase_approval_blocker(org_id)
+        if blocker:
+            msg = f"PURCHASE BLOCKED by approval gate: {blocker}"
+            logger.error(f"{msg} — org_id={org_id}, truck={truck.truck_title!r}")
+            _alert_blocked_purchase(org.org_name, truck.truck_title, blocker)
+            return CheckoutResult(success=False, status="failed_checkout",
+                                  mode="auto_buy", error_message=msg)
 
     # Mark truck as assigned AND create the matching purchase_attempts row
     # in one transaction. Previously these were two separate connections /

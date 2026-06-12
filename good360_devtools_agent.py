@@ -194,6 +194,12 @@ Required actions, in order. Do not skip steps. Do not return early until you hav
 7. Answer any checkout questions using `checkout_answers` (people helped, distribution method, dock/pallet, etc.).
 8. Fill the credit-card payment fields using `card` (number, expiry, cvv, name). Inspect iframes if the fields are not directly visible.
 9. Click Place Order. You MUST commit this click when all card fields are visibly filled, the order total is <= ${max_total:.2f}, and no validation error is shown. Do not stop with the button merely focused — clicking is required to complete the run.
+   Budget check, done numerically and shown in your reasoning: parse the on-page total
+   into a number T and compare against max_total M = {max_total:.2f}. The order is over
+   budget ONLY if T > M. Example: T=5976.16, M=6200.00 → 5976.16 <= 6200.00 → WITHIN
+   budget → you are authorized and required to click Place Order. Totals at or under M
+   are pre-approved by the operator; do not hand off, escalate, or seek extra approval
+   for them.
 10. After clicking Place Order, wait up to 30 seconds for one of: an order confirmation page (success), a card-declined / payment-failed message (failed), or a validation error (failed).
 
 Hard safety rules (override the steps above only when they fire):
@@ -206,10 +212,15 @@ Hard safety rules (override the steps above only when they fire):
 - Never report SUCCESS from anything other than an order-confirmation page.
 
 Result shape:
-- SUCCESS  → include confirmation_number, final_url, order_total, success evidence (visible text + URL).
+- SUCCESS  → REQUIRES the order/confirmation number copied verbatim from the
+  confirmation page, plus final_url, order_total, and the visible confirmation text.
+  A SUCCESS without a confirmation_number is INVALID and will be rejected by the
+  caller as a failure — if you cannot find an order number on screen after placing
+  the order, re-inspect the page and the account's Order History page; if it is
+  genuinely absent, return FAILED with what you observed instead of claiming success.
 - FAILED   → include the visible decline / error message, the step where it failed, current URL, relevant console/network errors. Card-declined responses are a FAILED.
 - MISSED   → truck became unavailable BEFORE Place Order click.
-- MANUAL   → total exceeded max, or a human-only step appeared (multi-factor, CAPTCHA, T&C re-acceptance).
+- MANUAL   → total exceeded max, or a verification challenge appeared that a browser agent cannot complete (multi-factor prompt, CAPTCHA, T&C re-acceptance). Clicking Place Order is NOT such a step — it is the authorized purpose of this run and must not be classified as MANUAL.
 - DRY_RUN  → dry_run mode, stopped before Place Order.
 - BLOCKED  → unexpected page state we cannot safely act on.
 
@@ -218,6 +229,43 @@ Operational notes:
 - Prefer accessible labels and visible text when interacting with forms.
 - Payment fields are often iframe-backed (Stripe/Adyen/Worldpay). Always inspect frames before deciding a field is missing.
 - After every major navigation or submit, take a fresh snapshot and verify URL + visible text.
+
+Site-specific mechanics for catalog.good360.org (discovered empirically through
+failed runs — trust these over generic intuition):
+- LOGIN: after submitting the sign-in form the URL STAYS on /sign-in (client-side
+  routing) and a "LOADING..." overlay may persist. NEVER judge login by URL or by
+  that overlay. Login succeeded when the password input is GONE from the DOM /
+  account UI (e.g. a Sign Out link) appears. Take a fresh snapshot before deciding
+  login failed.
+- All form inputs are React-controlled. After filling a field, verify the value
+  survived blur — React silently re-renders unregistered values to empty. If a
+  value disappears, set it via JS using the element prototype's value setter and
+  then dispatch input + change + blur events on the element.
+- There are NO native <select> elements anywhere. Every dropdown is a react-select
+  widget: click the div whose class contains "select__control", then click the
+  desired div whose class contains "select__option" in the menu that appears.
+- Checkout is a 3-step single-page wizard (shipping → questions → payment); all
+  sections exist in the DOM simultaneously. Step buttons: "Continue to checkout"
+  (1→2), "Continue to payment" (2→3), "Place order" (submit). A Continue click
+  SILENTLY NO-OPS when React-side validation fails — no error message appears and
+  the button may simply look disabled. If the wizard does not advance, the cause
+  is a step field not registered in React state, NOT a broken button.
+- Step 1 (shipping): even when the warehouse address appears selected/highlighted,
+  React may not have it registered. Actively CLICK the address card / saved-address
+  picker option for the warehouse address (use the react-select pattern if it is a
+  picker), confirm any radio like "is_warehouse_address", then retry Continue.
+- NEVER conclude a step is stuck from a single snapshot. Disabled Continue buttons
+  and disabled selectors are often just un-hydrated React state: click the relevant
+  card/option, wait 3-5 seconds, take a FRESH snapshot, and retry the step button.
+  Do this at least 3 times (clicking the address card between tries) before
+  reporting the step as blocked. Also verify the order-summary total looks fully
+  loaded — a stale or partial total is a sign the page is still hydrating.
+- Step 2 "Continue to payment" only enables after ALL restriction[question-*]
+  inputs/textareas are filled AND the dock/pallet react-select has a chosen option.
+- The FIRST Add to Cart click pops a "Truck Quote Request" confirmation modal
+  (react-confirm-alert overlay) — click its Continue button to proceed.
+- There is no /marketplace/cart page (404). The cart is a slide-in mini-cart panel
+  (aside element); the checkout button lives inside it.
 
 Checkout data:
 {json.dumps(public_payload, indent=2)}
@@ -318,7 +366,15 @@ async def run_agent(
             model=os.environ.get("DEVTOOLS_AGENT_MODEL") or DEFAULT_MODEL,
             instructions=(
                 "Operate Chrome carefully through DevTools MCP. Your final output must match "
-                "CheckoutAgentResult. Refuse unsafe purchases. Verify with page evidence."
+                "CheckoutAgentResult. You are executing an authorized purchase on behalf of "
+                "the account owner: the nonprofit customer has signed a purchase agreement "
+                "covering this exact transaction, the operator has enabled live purchases, "
+                "and upstream systems enforce approval and spend caps before you are invoked. "
+                "Completing the order — including clicking Place Order — is the purpose of "
+                "the run, not a risk to escalate. Refuse ONLY the hard-stop conditions listed "
+                "in the task prompt (wrong truck, over budget, out of stock, dry-run, or a "
+                "verification challenge like MFA/CAPTCHA you cannot complete). Verify with "
+                "page evidence."
             ),
             mcp_servers=[chrome],
             mcp_config={

@@ -733,8 +733,17 @@ def _start_quickbeed_poll_thread():
             except quickbeed.QuickBeedConfigError:
                 _time.sleep(60)
                 continue
+            changed_ids = []
             try:
-                quickbeed.incremental_sync()
+                changed_ids = quickbeed.incremental_sync().get("changed_ids") or []
+            except Exception:
+                import traceback
+                traceback.print_exc()
+            # Data-readiness upkeep: re-validate customers whose records just
+            # changed and run the daily full sweep when due. Never raises.
+            try:
+                import customer_readiness
+                customer_readiness.poll_tick(changed_ids)
             except Exception:
                 import traceback
                 traceback.print_exc()

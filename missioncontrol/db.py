@@ -109,7 +109,12 @@ CREATE TABLE IF NOT EXISTS customers (
     cooldown_until      TEXT,                            -- local: post-purchase cooldown
     last_used_at        TEXT,                            -- local: last round-robin pick
     last_purchase_at    TEXT,
-    manual_queue_position INTEGER                        -- operator's drag-and-drop order; NULL = unranked (LRU fallback)
+    manual_queue_position INTEGER,                       -- operator's drag-and-drop order; NULL = unranked (LRU fallback)
+    -- data readiness (customer_readiness.py): NULL = never checked
+    data_ok             INTEGER,
+    data_issues         TEXT,                            -- JSON {"blockers":[],"warnings":[]}
+    data_checked_at     TEXT,
+    cards_meta          TEXT                             -- JSON [{rank,network,last4,expiry,usable}] — never PAN/CVV
 );
 CREATE INDEX IF NOT EXISTS idx_customers_status ON customers(status);
 CREATE INDEX IF NOT EXISTS idx_customers_updated ON customers(updated_at);
@@ -311,6 +316,14 @@ def _apply_migrations(c) -> None:
         "ALTER TABLE tracked_products ADD COLUMN manual_price REAL",
         # 2026-05-14: drag-and-drop queue ordering; NULL = unranked, LRU fallback
         "ALTER TABLE customers ADD COLUMN manual_queue_position INTEGER",
+        # 2026-06-11: customer data readiness flags (see customer_readiness.py)
+        # data_ok: NULL = never checked, 1 = complete, 0 = flagged
+        "ALTER TABLE customers ADD COLUMN data_ok INTEGER",
+        "ALTER TABLE customers ADD COLUMN data_issues TEXT",
+        "ALTER TABLE customers ADD COLUMN data_checked_at TEXT",
+        # 2026-06-11: non-sensitive card summary (last4/network/expiry/usable)
+        # for the customers list. No PAN or CVV is ever stored locally.
+        "ALTER TABLE customers ADD COLUMN cards_meta TEXT",
     ]
     for sql in migrations:
         try:

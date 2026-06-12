@@ -339,6 +339,7 @@ def incremental_sync() -> dict:
     client = QuickBeedClient.from_settings()
     n = 0
     last_seen = cursor
+    changed_ids: list[str] = []
     # Contract: updated_since is INCLUSIVE. To avoid reprocessing the cursor row,
     # we'd typically use the millisecond after — but the API uses second
     # precision so we simply skip records whose updated_at == cursor exactly
@@ -347,13 +348,15 @@ def incremental_sync() -> dict:
     for rec in client.iter_customers(updated_since=cursor, reason=REASON_RECONCILIATION):
         upsert_customer(rec)
         n += 1
+        if rec.get("id"):
+            changed_ids.append(rec["id"])
         if rec.get("updated_at") and (last_seen is None or rec["updated_at"] > last_seen):
             last_seen = rec["updated_at"]
     if last_seen:
         set_sync_state("last_updated_at", last_seen)
     set_sync_state("last_incremental_at", _utcnow_iso())
     return {"synced": n, "since": cursor, "last_updated_at": last_seen,
-            "roster": _push_to_roster()}
+            "changed_ids": changed_ids, "roster": _push_to_roster()}
 
 
 def fetch_full(customer_id: str, *, reason: str) -> dict:
@@ -365,6 +368,15 @@ def fetch_full(customer_id: str, *, reason: str) -> dict:
     rec = client.get_customer(customer_id, reason=reason)
     # Mirror the non-sensitive fields while we have them in hand.
     upsert_customer(rec)
+    # Every full record in hand is a free readiness check — flag missing
+    # data now rather than discovering it at purchase time. Never let a
+    # validation problem break the caller (it may be mid-purchase).
+    try:
+        import customer_readiness
+        customer_readiness.validate_and_flag(rec)
+    except Exception:  # noqa: BLE001
+        import traceback
+        traceback.print_exc()
     return rec
 
 

@@ -93,7 +93,7 @@ def sync_to_roster() -> dict:
     with dashboard_conn() as dc:
         customers = dc.execute(
             "SELECT id, organization_name, full_name, email, phone, status, "
-            "       max_budget, priority_level "
+            "       max_budget, priority_level, in_rotation "
             "FROM customers"
         ).fetchall()
 
@@ -118,7 +118,7 @@ def sync_to_roster() -> dict:
                             ELSE ?
                          END,
                          max_price_override = ?,
-                         auto_buy_global = CASE WHEN ? = 'active' THEN 1 ELSE 0 END,
+                         auto_buy_global = CASE WHEN ? = 'active' AND ? = 1 THEN 1 ELSE 0 END,
                          updated_at = datetime('now')
                        WHERE quickbeed_customer_id = ?""",
                     (
@@ -128,7 +128,10 @@ def sync_to_roster() -> dict:
                         cust["phone"] or "—",
                         roster_status, roster_status,
                         cust["max_budget"],
-                        roster_status,
+                        # The operator's dashboard rotation toggle must reach
+                        # the purchase engine: QuickBeed-active alone is NOT
+                        # eligibility. in_rotation=0 → auto_buy_global=0.
+                        roster_status, int(cust["in_rotation"] or 0),
                         cust["id"],
                     ),
                 )
@@ -149,7 +152,7 @@ def sync_to_roster() -> dict:
                         cust["phone"] or "—",
                         roster_status,
                         cust["max_budget"],
-                        1 if roster_status == "active" else 0,
+                        1 if (roster_status == "active" and int(cust["in_rotation"] or 0)) else 0,
                     ),
                 )
                 inserted += 1

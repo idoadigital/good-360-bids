@@ -26,6 +26,7 @@ import urllib.request
 from flask import Blueprint, Response, jsonify, redirect, request, send_from_directory
 
 import auth
+import customer_readiness
 from db import count_users, get_conn, has_any_user
 import quickbeed
 import secrets_store
@@ -3652,6 +3653,65 @@ def customer_set_rotation(customer_id):
             ),
         )
         updated = c.execute("SELECT * FROM customers WHERE id = ?", (customer_id,)).fetchone()
+
+    # Push the change into roster.db NOW — the purchase engine selects from
+    # the roster's nonprofits queue, so waiting for the next periodic sync
+    # would leave a window where a toggled-out customer can still be bought
+    # for. Best-effort: a sync failure must not fail the toggle itself.
+    try:
+        import quickbeed_roster_sync
+        quickbeed_roster_sync.sync_to_roster()
+    except Exception:  # noqa: BLE001
+        import traceback; traceback.print_exc()
+
+    return jsonify({"success": True, "data": dict(updated)})
+
+
+@bp.route("/api/admin/customers/<customer_id>/cooldown", methods=["DELETE"])
+@auth.super_admin_required
+def customer_clear_cooldown(customer_id):
+    """Manually graduate a customer out of cooldown. Clears cooldown_until
+    so the round-robin can pick them again immediately — the status and
+    in_rotation gates still apply. Audited like the rotation toggle."""
+    u = auth.current_user() or {}
+    with get_conn() as c:
+        row = c.execute(
+            "SELECT id, organization_name, cooldown_until FROM customers WHERE id = ?",
+            (customer_id,)).fetchone()
+        if not row:
+            return jsonify({"success": False, "error": "not found"}), 404
+        if not row["cooldown_until"]:
+            updated = c.execute("SELECT * FROM customers WHERE id = ?", (customer_id,)).fetchone()
+            return jsonify({"success": True, "data": dict(updated), "no_change": True})
+        old = row["cooldown_until"]
+        c.execute("UPDATE customers SET cooldown_until = NULL WHERE id = ?", (customer_id,))
+        c.execute(
+            "INSERT INTO admin_audit(user_id, user_email, action, target, detail, ip) "
+            "VALUES (?,?,?,?,?,?)",
+            (
+                u.get("id"),
+                u.get("email"),
+                "customer.cooldown_clear",
+                f"customer:{customer_id}",
+                f"cooldown_until {old} → cleared ({row['organization_name'] or 'unnamed'})",
+                request.remote_addr,
+            ),
+        )
+        updated = c.execute("SELECT * FROM customers WHERE id = ?", (customer_id,)).fetchone()
+
+    # The purchase engine keeps its own cooldown in roster.db — graduate the
+    # customer there too, or find_next_available_org would still skip them.
+    try:
+        import quickbeed_roster_sync
+        with quickbeed_roster_sync.roster_conn() as rc:
+            rc.execute(
+                "UPDATE nonprofits SET cooldown_until = NULL, "
+                "status = CASE WHEN status = 'cooldown' THEN 'active' ELSE status END "
+                "WHERE quickbeed_customer_id = ?", (customer_id,))
+            rc.commit()
+    except Exception:  # noqa: BLE001
+        import traceback; traceback.print_exc()
+
     return jsonify({"success": True, "data": dict(updated)})
 
 
@@ -3834,6 +3894,71 @@ def customer_credentials(customer_id: str):
     })
 
 
+@bp.route("/api/admin/customers/<customer_id>/card-details", methods=["GET"])
+@auth.super_admin_required
+def customer_card_details(customer_id: str):
+    """Return the customer's FULL card details (number, expiry, CVV, billing).
+    Super-admin only. Mirrors /credentials: every call audit-logs both
+    locally (admin_audit) and upstream on QuickBeed via the forwarded
+    reason. Nothing is stored locally — fetched, shown, discarded."""
+    reason = request.args.get("reason") or quickbeed.REASON_SUPPORT
+    try:
+        rec = quickbeed.fetch_full(customer_id, reason=reason)
+    except quickbeed.QuickBeedHTTPError as exc:
+        return jsonify({"success": False, "error": str(exc), "status": exc.status}), 502
+    except Exception as exc:  # noqa: BLE001
+        import traceback; traceback.print_exc()
+        return jsonify({"success": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+
+    cards = []
+    for pm in rec.get("payment_methods") or []:
+        cards.append({
+            "rank": pm.get("rank"),
+            "network": pm.get("card_network"),
+            "type": pm.get("type"),
+            "name_on_card": pm.get("name_on_card"),
+            "card_number": pm.get("card_number"),
+            "cvv": pm.get("cvv"),
+            "exp_month": pm.get("exp_month"),
+            "exp_year": pm.get("exp_year"),
+            "expiry_normalized": customer_readiness.expiry_mmyy(
+                pm.get("exp_month"), pm.get("exp_year")),
+            "billing_address": pm.get("billing_address"),
+        })
+    validation = customer_readiness.validate_record(rec)
+
+    auth.audit("customer_card_view", target=customer_id,
+               detail=f"reason={reason}; cards={len(cards)}")
+
+    return jsonify({"success": True, "data": {
+        "cards": cards,
+        "validation": validation,
+        "_reason_logged": reason,
+    }})
+
+
+@bp.route("/api/admin/customers/<customer_id>/revalidate", methods=["POST"])
+@auth.login_required
+def customer_revalidate(customer_id: str):
+    """Resync this one customer from QuickBeed NOW and re-run the
+    payment-data validation. fetch_full() refreshes the local mirror,
+    flags, and card summary as a side effect; the response tells the
+    operator whether a purchase would succeed with the data on file."""
+    try:
+        rec = quickbeed.fetch_full(customer_id, reason=quickbeed.REASON_RECONCILIATION)
+    except quickbeed.QuickBeedHTTPError as exc:
+        return jsonify({"success": False, "error": str(exc), "status": exc.status}), 502
+    except Exception as exc:  # noqa: BLE001
+        import traceback; traceback.print_exc()
+        return jsonify({"success": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+
+    validation = customer_readiness.validate_record(rec)
+    auth.audit("customer_revalidate", target=customer_id,
+               detail=f"ok={validation['ok']} blockers={len(validation['blockers'])}")
+    return jsonify({"success": True, "validation": validation,
+                    "cards_meta": customer_readiness.cards_meta(rec)})
+
+
 def _build_test_card(card_choice: str, customer_cards: list[dict]) -> tuple[dict | None, str]:
     """Translate `card_choice` from the UI into a runtime card dict.
 
@@ -3978,7 +4103,7 @@ def customer_test_purchase(customer_id: str):
     profile = rec.get("profile") or {}
     ops     = rec.get("operations") or {}
 
-    email = pc.get("username") or ""
+    email = (pc.get("username") or "").strip()
     password = pc.get("password") or ""
     if not email or not password:
         return jsonify({"success": False,
@@ -4348,6 +4473,54 @@ def trigger_sync():
         return jsonify({"success": False, "error": f"{type(exc).__name__}: {exc}"}), 500
 
 
+@bp.route("/api/admin/data-issues", methods=["GET"])
+@auth.login_required
+def data_issues_list():
+    """Customers with data-readiness flags. data_ok: NULL = never checked,
+    0 = flagged (autobuy would fail), 1 = complete."""
+    with get_conn() as c:
+        rows = c.execute(
+            """SELECT id, organization_name, full_name, email, status, in_rotation,
+                      data_ok, data_issues, data_checked_at
+                 FROM customers
+                WHERE status NOT IN ('inactive', 'suspended')
+                ORDER BY (data_ok IS NOT 0), organization_name COLLATE NOCASE"""
+        ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["data_issues"] = json.loads(d["data_issues"]) if d["data_issues"] else None
+        except (ValueError, TypeError):
+            pass
+        out.append(d)
+    return jsonify({
+        "success": True,
+        "data": out,
+        "flagged_count": sum(1 for d in out if d["data_ok"] == 0),
+        "unchecked_count": sum(1 for d in out if d["data_ok"] is None),
+        "last_sweep_at": quickbeed.get_sync_state(customer_readiness.SWEEP_STATE_KEY),
+    })
+
+
+@bp.route("/api/admin/data-issues/check", methods=["POST"])
+@auth.login_required
+def data_issues_check():
+    """Run a readiness sweep now: fetch + validate every active/onboarding
+    customer, flag incomplete records, alert the operator on new blockers."""
+    try:
+        summary = customer_readiness.sweep_all()
+        auth.audit("customer_readiness_sweep", target="all",
+                   detail=f"checked={summary['checked']} flagged={len(summary['flagged'])} "
+                          f"errors={len(summary['errors'])}")
+        return jsonify({"success": True, **summary})
+    except quickbeed.QuickBeedConfigError as exc:
+        return jsonify({"success": False, "error": f"config: {exc}"}), 400
+    except Exception as exc:  # noqa: BLE001
+        import traceback; traceback.print_exc()
+        return jsonify({"success": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+
+
 @bp.route("/api/admin/customers/test-connection", methods=["POST"])
 @auth.login_required
 def test_connection():
@@ -4417,7 +4590,11 @@ def internal_org_config(customer_id):
     org_config = {
         "quickbeed_customer_id": rec.get("id"),
         "name": profile.get("organization_name"),
-        "good360_email": pc.get("username"),
+        # .strip(): a trailing space in the stored username made Good360's
+        # sign-in form reject the email as invalid (reviving homes,
+        # 2026-06-12). Whitespace can never be part of an email address, so
+        # trimming is safe normalization, not data invention.
+        "good360_email": (pc.get("username") or "").strip() or None,
         "good360_password": pc.get("password"),
         "warehouse_address": ops.get("warehouse_address"),
         "has_dock": bool(ops.get("has_loading_dock")),
@@ -4451,14 +4628,9 @@ def internal_org_config(customer_id):
 def _card_to_org(pm: dict | None) -> dict | None:
     if not pm:
         return None
-    em = pm.get("exp_month")
-    ey = pm.get("exp_year")
-    expiry_mmyy = ""
-    try:
-        if em is not None and ey is not None:
-            expiry_mmyy = f"{int(em):02d}{int(ey) % 100:02d}"
-    except (TypeError, ValueError):
-        expiry_mmyy = ""
+    # Expiry normalization lives in customer_readiness so validation and
+    # the live org-config translation can never drift apart.
+    expiry_mmyy = customer_readiness.expiry_mmyy(pm.get("exp_month"), pm.get("exp_year"))
     return {
         "name": pm.get("name_on_card"),
         "number": pm.get("card_number"),

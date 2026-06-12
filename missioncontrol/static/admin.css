@@ -2000,7 +2000,11 @@ table.data.expandable tbody tr.scan-detail td {
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
 }
-.autobuy-toggle:disabled { opacity: 0.6; cursor: wait; }
+/* Two distinct disabled states: a toggle that's unavailable (e.g. autobuy
+   on an untracked product) gets not-allowed; the busy cursor is reserved
+   for the moment a click is actually saving (.saving set by JS). */
+.autobuy-toggle:disabled { opacity: 0.6; cursor: not-allowed; }
+.autobuy-toggle.saving:disabled { cursor: progress; }
 
 .autobuy-toggle__track {
     width: 44px;
