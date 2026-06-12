@@ -2136,6 +2136,9 @@ def _roster_purchase_rows(where_sql: str = "", params: tuple = (), limit: int = 
             pa.screenshot_path     AS screenshot_path,
             pa.confirmation_number AS confirmation_number,
             pa.order_total         AS order_total,
+            pa.order_status        AS order_status,
+            pa.order_status_source AS order_status_source,
+            pa.order_status_updated_at AS order_status_updated_at,
             pa.cooldown_applied    AS cooldown_applied,
             te.truck_title         AS truck_title,
             te.truck_url           AS truck_url,
@@ -3275,6 +3278,90 @@ def roster_queue_reorder():
         import traceback; traceback.print_exc()
 
     return jsonify({"success": True, "data": {"ranked": len(ids)}})
+
+
+_ORDER_STATUSES = ("approved", "delivered", "canceled", "refunded")
+
+
+def _set_order_status(attempt_id: int, status: str) -> tuple[bool, str | None]:
+    """Operator lifecycle button: set a MANUAL order status on a roster
+    purchase attempt. Manual always wins — the order verifier never
+    overwrites source='manual' rows. Returns (ok, error)."""
+    status = (status or "").strip().lower()
+    if status not in _ORDER_STATUSES:
+        return False, f"status must be one of {', '.join(_ORDER_STATUSES)}"
+    import sqlite3 as _sqlite
+    conn = _sqlite.connect(ROSTER_DB_PATH, timeout=10.0)
+    try:
+        cur = conn.execute(
+            """UPDATE purchase_attempts
+               SET order_status = ?, order_status_source = 'manual',
+                   order_status_updated_at = datetime('now')
+               WHERE id = ?""",
+            (status, attempt_id))
+        conn.commit()
+        if cur.rowcount == 0:
+            return False, "attempt not found"
+        return True, None
+    finally:
+        conn.close()
+
+
+@bp.route("/api/admin/purchases/roster/<int:attempt_id>/order-status", methods=["PATCH"])
+@auth.login_required
+def purchase_order_status(attempt_id):
+    """Dynamic buyer history: operator sets the post-purchase lifecycle
+    status (delivered / canceled / refunded / approved). Audited."""
+    body = request.get_json(silent=True) or {}
+    ok, err = _set_order_status(attempt_id, body.get("status"))
+    if not ok:
+        code = 404 if err == "attempt not found" else 400
+        return jsonify({"success": False, "error": err}), code
+    u = auth.current_user() or {}
+    with get_conn() as c:
+        c.execute(
+            "INSERT INTO admin_audit(user_id, user_email, action, target, detail, ip) "
+            "VALUES (?,?,?,?,?,?)",
+            (u.get("id"), u.get("email"), "purchase.order_status",
+             f"purchase_attempt:{attempt_id}",
+             f"order_status -> {body.get('status')}", request.remote_addr))
+    return jsonify({"success": True})
+
+
+@bp.route("/api/admin/customers/<customer_id>/orders/sync", methods=["POST"])
+@auth.login_required
+def customer_orders_sync(customer_id):
+    """Dynamic buyer history: re-verify this customer's orders against
+    Good360's Order History (read-only; reuses the saved session, never
+    attempts a fresh login). Runs in the background; the UI refetches."""
+    import sqlite3 as _sqlite
+    conn = _sqlite.connect(ROSTER_DB_PATH, timeout=10.0)
+    try:
+        row = conn.execute(
+            "SELECT id FROM nonprofits WHERE quickbeed_customer_id = ?",
+            (customer_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return jsonify({"success": False, "error": "customer not in roster"}), 404
+    org_id = row[0]
+    u = auth.current_user() or {}
+    with get_conn() as c:
+        c.execute(
+            "INSERT INTO admin_audit(user_id, user_email, action, target, detail, ip) "
+            "VALUES (?,?,?,?,?,?)",
+            (u.get("id"), u.get("email"), "purchase.orders_sync",
+             f"customer:{customer_id}", f"org_id={org_id}", request.remote_addr))
+    import threading
+    import order_verifier
+
+    def _run():
+        try:
+            order_verifier.verify_customer(org_id)
+        except Exception:  # noqa: BLE001
+            import traceback; traceback.print_exc()
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"success": True, "started": True, "org_id": org_id})
 
 
 @bp.route("/api/admin/login-attempts", methods=["GET"])

@@ -1251,6 +1251,11 @@ function _purchaseDetailBody(p) {
     push('Source',          p.source || 'legacy');
     push('Engine',          p.engine);
     push('Status',          p.status);
+    // Dynamic buyer history: lifecycle chip + buttons (roster successes only)
+    if ((p.source || 'roster') === 'roster') {
+        const cell = orderLifecycleCell(p);
+        if (cell !== '—') push('Order status', cell);
+    }
     push('Mode',            p.mode);
     push('Started',         p.started_at);
     push('Completed',       p.completed_at);
@@ -1644,7 +1649,7 @@ const HIST_STATE = { rows: [], page: 0, perPage: 10 };
 
 async function loadCustomerHistory(id) {
     const tb = $('#cdHistoryTable tbody');
-    tb.innerHTML = `<tr><td colspan="5"><div class="empty-state">Loading…</div></td></tr>`;
+    tb.innerHTML = `<tr><td colspan="6"><div class="empty-state">Loading…</div></td></tr>`;
     try {
         const r = await api(`/api/admin/customers/${encodeURIComponent(id)}/purchases`).then(r => r.json());
         if (!r.success) throw new Error(r.error || 'failed');
@@ -1659,7 +1664,7 @@ async function loadCustomerHistory(id) {
         HIST_STATE.page = 0;
         renderCustomerHistory();
     } catch (e) {
-        tb.innerHTML = `<tr><td colspan="5"><div class="empty-state">Failed to load: ${escape(String(e.message || e))}</div></td></tr>`;
+        tb.innerHTML = `<tr><td colspan="6"><div class="empty-state">Failed to load: ${escape(String(e.message || e))}</div></td></tr>`;
     }
 }
 
@@ -1668,7 +1673,7 @@ function renderCustomerHistory() {
     tb.innerHTML = '';
     const rows = HIST_STATE.rows;
     if (!rows.length) {
-        tb.innerHTML = `<tr><td colspan="5"><div class="empty-state">No purchase attempts on record for this customer yet.</div></td></tr>`;
+        tb.innerHTML = `<tr><td colspan="6"><div class="empty-state">No purchase attempts on record for this customer yet.</div></td></tr>`;
         $('#cdHistPager').hidden = true;
         return;
     }
@@ -1684,6 +1689,7 @@ function renderCustomerHistory() {
             <td data-label="Truck">${escape(p.truck || '—')}</td>
             <td class="num" data-label="Total">${p.total != null ? '$' + Number(p.total).toFixed(2) : '—'}</td>
             <td data-label="Status"><span class="pill ${pillClass(status)}">${escape(status.toLowerCase())}</span></td>
+            <td data-label="Order">${orderLifecycleCell(p)}</td>
             <td class="mono" data-label="Detail">${escape(p.detail || p.error || p.confirmation_number || '—')}</td>
         `;
         tb.appendChild(tr);
@@ -1700,6 +1706,64 @@ document.querySelectorAll('#cdHistPager .pager-btn').forEach(btn => {
         HIST_STATE.page += btn.dataset.pg === 'next' ? 1 : -1;
         renderCustomerHistory();
     });
+});
+
+// ---- Dynamic buyer history: order lifecycle (spec 2026-06-12) ----
+
+const ORDER_PILL = { approved: 'ok', delivered: 'ok',
+                     canceled: 'err', refunded: 'warn' };
+
+function orderLifecycleCell(p) {
+    // Lifecycle only applies to roster successes that produced an order.
+    const isSuccess = (p.status || '').toLowerCase() === 'success';
+    if (!isSuccess || p.attempt_id == null) return '—';
+    const st = (p.order_status || '').toLowerCase();
+    const src = p.order_status_source === 'manual' ? ' title="set manually — auto-sync will not overwrite"' : '';
+    const chip = st
+        ? `<span class="pill ${ORDER_PILL[st] || ''}"${src}>${escape(st)}${p.order_status_source === 'manual' ? ' ✎' : ''}</span>`
+        : `<span class="pill idle">unverified</span>`;
+    const btn = (s, label) =>
+        `<button class="btn btn-sm" data-order-status="${s}" data-attempt="${p.attempt_id}" ${st === s ? 'disabled' : ''}>${label}</button>`;
+    return `<div class="order-lifecycle">${chip}<span class="order-actions">${btn('delivered', '✓')}${btn('canceled', '✕')}${btn('refunded', '↩')}</span></div>`;
+}
+
+document.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-order-status]');
+    if (!b) return;
+    const labels = { delivered: 'DELIVERED', canceled: 'CANCELED', refunded: 'REFUNDED' };
+    if (!confirm(`Mark this order as ${labels[b.dataset.orderStatus]}? (manual status — auto-sync will not overwrite it)`)) return;
+    b.disabled = true;
+    try {
+        const r = await api(`/api/admin/purchases/roster/${b.dataset.attempt}/order-status`,
+            { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ status: b.dataset.orderStatus }) }).then(r => r.json());
+        if (!r.success) throw new Error(r.error || 'failed');
+        if (_currentCustomerId) loadCustomerHistory(_currentCustomerId);
+        // Refresh the Purchases tab too if its panel is the active one.
+        if (document.querySelector('[data-panel="purchases"].active, [data-panel="purchases"]:not([hidden]) #purchasesTable')) {
+            loadPurchases().catch(() => {});
+        }
+    } catch (err) {
+        alert('Status update failed: ' + (err.message || err));
+        b.disabled = false;
+    }
+});
+
+$('#cdHistSync')?.addEventListener('click', async () => {
+    if (!_currentCustomerId) return;
+    const btn = $('#cdHistSync');
+    btn.disabled = true; btn.textContent = '⟳ Syncing…';
+    try {
+        const r = await api(`/api/admin/customers/${encodeURIComponent(_currentCustomerId)}/orders/sync`,
+            { method: 'POST' }).then(r => r.json());
+        if (!r.success) throw new Error(r.error || 'failed');
+        // The verifier runs in the background (browser login + parse);
+        // refetch after a beat so the row statuses/totals land.
+        setTimeout(() => { if (_currentCustomerId) loadCustomerHistory(_currentCustomerId); btn.disabled = false; btn.textContent = '⟳ Sync orders'; }, 12000);
+    } catch (err) {
+        alert('Sync failed to start: ' + (err.message || err));
+        btn.disabled = false; btn.textContent = '⟳ Sync orders';
+    }
 });
 
 function openCustomerDetail(id) {

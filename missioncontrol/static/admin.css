@@ -3964,3 +3964,9 @@ html.motion-ready .panel .is-revealed {
         transition: none !important;
     }
 }
+
+/* Dynamic buyer history: order lifecycle cell (2026-06-12) */
+.order-lifecycle { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.order-actions { display: inline-flex; gap: 3px; opacity: 0; transition: opacity .15s; }
+tr:hover .order-actions { opacity: 1; }
+.order-actions .btn { padding: 1px 7px; line-height: 1.4; }

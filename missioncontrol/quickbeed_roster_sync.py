@@ -76,6 +76,22 @@ def ensure_roster_initialized() -> None:
             c.execute("ALTER TABLE nonprofits ADD COLUMN manual_rank INTEGER")
             c.commit()
             logger.info("Added manual_rank column to nonprofits")
+        # Migration: dynamic buyer history — post-purchase lifecycle status
+        # + auto-attached proof (spec docs/superpowers/specs/2026-06-12-
+        # dynamic-buyer-history-design.md).
+        pa_cols = {row["name"] for row in
+                   c.execute("PRAGMA table_info(purchase_attempts)").fetchall()}
+        added = False
+        for col, typ in (("order_status", "TEXT"),
+                         ("order_status_source", "TEXT"),
+                         ("order_status_updated_at", "TEXT"),
+                         ("proof", "TEXT")):
+            if pa_cols and col not in pa_cols:
+                c.execute(f"ALTER TABLE purchase_attempts ADD COLUMN {col} {typ}")
+                added = True
+        if added:
+            c.commit()
+            logger.info("Added order lifecycle columns to purchase_attempts")
 
 
 # QuickBeed status → roster nonprofits.status mapping.

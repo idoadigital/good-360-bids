@@ -285,6 +285,29 @@ def get_product_db_flags(name):
         return None, None
 
 
+_last_verifier_check = 0.0
+
+
+def _maybe_run_order_verifier():
+    """Dynamic buyer history: kick the daily Order History sync from the
+    monitor's single process (gunicorn has 3 workers — running it there
+    would stampede). Checked at most hourly here; run_full_sync() itself
+    is 24h-gated and file-locked, so this is cheap and safe to call every
+    scan."""
+    global _last_verifier_check
+    if time.time() - _last_verifier_check < 3600:
+        return
+    _last_verifier_check = time.time()
+    try:
+        import sys as _sys
+        if "/app/missioncontrol" not in _sys.path:
+            _sys.path.insert(0, "/app/missioncontrol")
+        import order_verifier
+        _fire_and_forget("order-verifier", order_verifier.run_full_sync)
+    except Exception as e:
+        log_cron(f"  [ORDER VERIFIER] trigger failed: {e}")
+
+
 def _autobuy_banner():
     """AUTO-BUY banner built from the live tracked_products toggles.
 
@@ -1857,6 +1880,7 @@ def main():
 
         save_state(state)
         append_run_log(now, trucks, alert_sent, action_taken)
+        _maybe_run_order_verifier()
 
         if alert_sent:
             result_msg = action_taken + ": " + str([t["name"] for t in newly_available])

@@ -1115,6 +1115,32 @@ def _sync_cooldown_to_dashboard(org_id: int, cooldown_until_iso: str) -> None:
                      "roster cooldown is still in effect")
 
 
+def _seed_purchase_proof(attempt_id: int, result) -> None:
+    """Dynamic buyer history: stamp a fresh live success with its initial
+    lifecycle status + auto-attached evidence (spec 2026-06-12). The order
+    verifier later appends Order-History verifications; an operator's
+    manual status always outranks this. Best-effort."""
+    import json as _json
+    try:
+        proof = {
+            "order_id": result.confirmation_number,
+            "screenshot": result.screenshot_path,
+            "seeded_at": datetime.utcnow().isoformat(),
+        }
+        with get_db_connection() as conn:
+            conn.execute(
+                """UPDATE purchase_attempts
+                   SET order_status = 'approved',
+                       order_status_source = 'auto',
+                       order_status_updated_at = datetime('now'),
+                       proof = ?
+                   WHERE id = ? AND order_status IS NULL""",
+                (_json.dumps(proof), attempt_id))
+            conn.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"proof seeding failed for attempt {attempt_id}: {e}")
+
+
 def attempt_purchase(org_id: int, truck_event_id: int,
                      *, test_card_override: dict | None = None) -> CheckoutResult:
     """
@@ -1254,6 +1280,9 @@ def attempt_purchase(org_id: int, truck_event_id: int,
                 # the roster and the dashboard are separate stores and only
                 # the roster was updated until 2026-06-12.
                 _sync_cooldown_to_dashboard(org_id, cooldown_until)
+
+                # Dynamic buyer history: initial lifecycle status + proof.
+                _seed_purchase_proof(attempt_id, result)
 
                 from billing_manager import record_finding_fee
                 record_finding_fee(org_id, attempt_id, truck.truck_price)
