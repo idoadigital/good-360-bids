@@ -1071,6 +1071,50 @@ def _alert_blocked_purchase(org_name: str, truck_title: str, reason: str) -> Non
         pass
 
 
+def _sync_cooldown_to_dashboard(org_id: int, cooldown_until_iso: str) -> None:
+    """Mirror a roster cooldown into the dashboard's customers table.
+
+    queue_manager.apply_cooldown() only writes roster.db (nonprofits), but
+    the monitor's queue and the operator's UI read the dashboard
+    (customers.cooldown_until) — without this write-back the dashboard
+    keeps showing the customer as available after a live purchase.
+    Best-effort: a failure here must never fail the purchase bookkeeping
+    (the money has already moved; the roster cooldown is still in effect).
+    """
+    try:
+        with get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT quickbeed_customer_id FROM nonprofits WHERE id = ?",
+                (org_id,)).fetchone()
+        keys = row.keys() if row is not None and hasattr(row, "keys") else []
+        qb_id = row["quickbeed_customer_id"] if "quickbeed_customer_id" in keys else None
+        if not qb_id:
+            logger.warning(f"cooldown write-back skipped: org {org_id} has no "
+                           "QuickBeed customer id in roster")
+            return
+        # Roster stores ISO ('2026-06-19T01:00:00.123456'); the dashboard
+        # compares against sqlite datetime('now') ('2026-06-19 01:00:00').
+        dash_until = cooldown_until_iso.replace("T", " ")[:19]
+        import sys as _sys
+        if "/app/missioncontrol" not in _sys.path:
+            _sys.path.insert(0, "/app/missioncontrol")
+        from db import get_conn as _dash_conn  # type: ignore
+        with _dash_conn() as c:
+            c.execute(
+                """UPDATE customers
+                   SET cooldown_until = ?,
+                       last_used_at = datetime('now'),
+                       last_purchase_at = datetime('now')
+                   WHERE id = ?""",
+                (dash_until, qb_id))
+        logger.info(f"cooldown write-back: dashboard customer {qb_id} "
+                    f"on cooldown until {dash_until}")
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"cooldown write-back FAILED for org {org_id}: {e} — "
+                     "dashboard may show this customer as available, but the "
+                     "roster cooldown is still in effect")
+
+
 def attempt_purchase(org_id: int, truck_event_id: int,
                      *, test_card_override: dict | None = None) -> CheckoutResult:
     """
@@ -1206,6 +1250,10 @@ def attempt_purchase(org_id: int, truck_event_id: int,
                 cooldown_until = on_purchase_success(
                     org_id, truck_event_id, result.confirmation_number
                 )
+                # Mirror the cooldown into the dashboard (customers table) —
+                # the roster and the dashboard are separate stores and only
+                # the roster was updated until 2026-06-12.
+                _sync_cooldown_to_dashboard(org_id, cooldown_until)
 
                 from billing_manager import record_finding_fee
                 record_finding_fee(org_id, attempt_id, truck.truck_price)
