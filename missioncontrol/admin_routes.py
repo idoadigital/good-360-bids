@@ -3259,6 +3259,17 @@ def roster_queue_reorder():
                 "UPDATE customers SET manual_queue_position = ? WHERE id = ?",
                 (pos, cid),
             )
+
+    # Push the new order into roster.db immediately — the purchase engine
+    # reads nonprofits.manual_rank, and waiting for the poll loop would
+    # leave up to a 5-minute window where the old order still applies.
+    # Best-effort: a sync failure must not fail the reorder itself.
+    try:
+        import quickbeed_roster_sync
+        quickbeed_roster_sync.sync_to_roster()
+    except Exception:  # noqa: BLE001
+        import traceback; traceback.print_exc()
+
     return jsonify({"success": True, "data": {"ranked": len(ids)}})
 
 

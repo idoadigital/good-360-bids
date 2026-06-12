@@ -70,6 +70,12 @@ def ensure_roster_initialized() -> None:
             )
             c.commit()
             logger.info("Added quickbeed_customer_id column + index to nonprofits")
+        # Migration: mirror of the operator's manual queue order (dashboard
+        # drag-and-drop) so find_next_available_org can honor it.
+        if "manual_rank" not in cols:
+            c.execute("ALTER TABLE nonprofits ADD COLUMN manual_rank INTEGER")
+            c.commit()
+            logger.info("Added manual_rank column to nonprofits")
 
 
 # QuickBeed status → roster nonprofits.status mapping.
@@ -93,7 +99,7 @@ def sync_to_roster() -> dict:
     with dashboard_conn() as dc:
         customers = dc.execute(
             "SELECT id, organization_name, full_name, email, phone, status, "
-            "       max_budget, priority_level, in_rotation "
+            "       max_budget, priority_level, in_rotation, manual_queue_position "
             "FROM customers"
         ).fetchall()
 
@@ -119,6 +125,7 @@ def sync_to_roster() -> dict:
                          END,
                          max_price_override = ?,
                          auto_buy_global = CASE WHEN ? = 'active' AND ? = 1 THEN 1 ELSE 0 END,
+                         manual_rank = ?,
                          updated_at = datetime('now')
                        WHERE quickbeed_customer_id = ?""",
                     (
@@ -132,6 +139,9 @@ def sync_to_roster() -> dict:
                         # the purchase engine: QuickBeed-active alone is NOT
                         # eligibility. in_rotation=0 → auto_buy_global=0.
                         roster_status, int(cust["in_rotation"] or 0),
+                        # Operator's drag-and-drop order; NULL = unranked
+                        # (falls back to LRU behind the ranked set).
+                        cust["manual_queue_position"],
                         cust["id"],
                     ),
                 )
@@ -141,9 +151,9 @@ def sync_to_roster() -> dict:
                     """INSERT INTO nonprofits
                          (quickbeed_customer_id, org_name, contact_name,
                           contact_email, contact_phone, status,
-                          max_price_override, auto_buy_global,
+                          max_price_override, auto_buy_global, manual_rank,
                           subscription_active, agreement_signed)
-                       VALUES (?,?,?,?,?,?,?,?,1,1)""",
+                       VALUES (?,?,?,?,?,?,?,?,?,1,1)""",
                     (
                         cust["id"],
                         cust["organization_name"] or "(unnamed)",
@@ -153,6 +163,7 @@ def sync_to_roster() -> dict:
                         roster_status,
                         cust["max_budget"],
                         1 if (roster_status == "active" and int(cust["in_rotation"] or 0)) else 0,
+                        cust["manual_queue_position"],
                     ),
                 )
                 inserted += 1

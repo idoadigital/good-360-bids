@@ -78,7 +78,13 @@ def get_queue_position(org_id: int) -> int:
 
 def find_next_available_org(truck_category: str = None, truck_price: float = None) -> sqlite3.Row | None:
     """Find the next org in the queue that is active (not in cooldown).
-    Sorts by queue_position ASC (position 1 = longest waiting).
+
+    The operator's manual order wins: manual_rank (synced from the
+    dashboard's drag-and-drop manual_queue_position) sorts first; orgs the
+    operator hasn't ranked fall back behind the ranked set in LRU order
+    (queue_position ASC, position 1 = longest waiting). Eligibility filters
+    (status, cooldown, auto_buy_global) apply either way — manual order is
+    an ordering hint, never an eligibility bypass.
     Returns the org Row or None.
     """
     cooldown_days = get_cooldown_days()
@@ -90,7 +96,8 @@ def find_next_available_org(truck_category: str = None, truck_price: float = Non
             WHERE n.status = 'active'
               AND (n.cooldown_until IS NULL OR n.cooldown_until < ?)
               AND n.auto_buy_global = 1
-            ORDER BY n.queue_position ASC
+            ORDER BY (n.manual_rank IS NULL), n.manual_rank ASC,
+                     n.queue_position ASC
             LIMIT 1
         """, (now,)).fetchone()
         return row
