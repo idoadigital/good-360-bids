@@ -1115,6 +1115,40 @@ def _sync_cooldown_to_dashboard(org_id: int, cooldown_until_iso: str) -> None:
                      "roster cooldown is still in effect")
 
 
+def _alert_payment_failure(org_name: str, truck_title: str, error: str) -> None:
+    """STRICT CARD GUARDRAIL companion (operator directive 2026-06-12):
+    when a live payment fails, the operator gets the processor's error
+    message verbatim. The transaction is failed and left alone — no card
+    substitution, no payment-data modification. Best-effort delivery."""
+    import html as _html
+    import requests as _requests
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat = (os.environ.get("TELEGRAM_OPERATOR_CHAT_ID") or "").strip()
+    msg = ("💳 <b>PAYMENT FAILED — transaction stopped</b>\n"
+           f"Org: <b>{_html.escape(str(org_name))}</b>\n"
+           f"Truck: {_html.escape(str(truck_title))}\n"
+           f"Processor: {_html.escape(str(error)[:500])}\n"
+           "Per the card guardrail, no other card was tried and no payment "
+           "data was modified. Fix the card in QuickBeed, then re-arm.")
+    if token and chat:
+        try:
+            _requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat, "text": msg, "parse_mode": "HTML",
+                      "disable_web_page_preview": True},
+                timeout=10)
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        import notifications_log
+        notifications_log.record_telegram(
+            source="autobuy_payment_failure", message=msg,
+            delivered=bool(token and chat), channel="operator", level="error",
+            title=f"Payment failed: {org_name}")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _seed_purchase_proof(attempt_id: int, result) -> None:
     """Dynamic buyer history: stamp a fresh live success with its initial
     lifecycle status + auto-attached evidence (spec 2026-06-12). The order
@@ -1314,27 +1348,19 @@ def attempt_purchase(org_id: int, truck_event_id: int,
             )
             logger.warning(f"Card #{card['priority']} failed: {result.error_message}")
 
-    # All cards failed — try master card fallback (production only)
+    # STRICT CARD GUARDRAIL (operator directive 2026-06-12): if payment
+    # fails because of the customer's card, record the failure, alert the
+    # operator with the processor's message, and STOP. Under NO
+    # circumstances may a card that is not attached to the customer's own
+    # account be used — the master-card fallback that used to live here is
+    # deliberately severed, regardless of org.master_card_fallback or any
+    # consent flag. Do not reconnect it without the operator's written
+    # instruction.
     if not test_mode and org.master_card_fallback:
-        logger.info(f"All org cards failed — attempting master card fallback for org {org_id}")
-        master_result = handle_master_card_fallback(org, truck,
-                                                    [c["id"] for c in payment_methods])
-        master_result.attempt_number = len(payment_methods) + 1
-
-        if master_result.success:
-            update_purchase_attempt(
-                attempt_id, master_result.status,
-                confirmation_number=master_result.confirmation_number,
-                order_total=master_result.order_total,
-                screenshot_path=master_result.screenshot_path,
-                cooldown_applied=True,
-            )
-
-            from queue_manager import on_purchase_success
-            on_purchase_success(org_id, truck_event_id,
-                              master_result.confirmation_number)
-
-            return master_result
+        logger.warning(
+            f"org {org_id} has master_card_fallback set, but the card "
+            "guardrail forbids substituting any non-customer card — "
+            "failing the transaction instead.")
 
     # Complete failure. Surface the most informative error we saw:
     # the last attempt's underlying agent message if any, else a generic
@@ -1344,6 +1370,8 @@ def attempt_purchase(org_id: int, truck_event_id: int,
                  if (last_result and last_result.error_message)
                  else "All payment methods failed (no payment methods attempted)")
     update_purchase_attempt(attempt_id, "failed_payment", error_message=final_err)
+    if not test_mode:
+        _alert_payment_failure(org.org_name, truck.truck_title, final_err)
 
     with get_db_connection() as conn:
         conn.execute(
