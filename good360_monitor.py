@@ -271,6 +271,32 @@ def get_product_db_flags(name):
         return None, None
 
 
+def _autobuy_banner():
+    """AUTO-BUY banner built from the live tracked_products toggles.
+
+    The old banner hardcoded a product list ("New Unsorted + Variety +
+    Houseware") that drifted from what the operator actually has toggled
+    on in the dashboard — this reads the same table get_product_db_flags
+    uses, so the banner can't lie."""
+    cap = f"(max ${MAX_AUTO_PAY:,.0f})"
+    try:
+        import sys as _sys
+        if "/app/missioncontrol" not in _sys.path:
+            _sys.path.insert(0, "/app/missioncontrol")
+        from db import get_conn as _get_conn  # type: ignore
+        with _get_conn() as c:
+            rows = c.execute(
+                "SELECT name FROM tracked_products "
+                "WHERE tracked = 1 AND autobuy_enabled = 1 ORDER BY name"
+            ).fetchall()
+        names = [r["name"] for r in rows]
+    except Exception:
+        return f"  [AUTO-BUY: ACTIVE - product toggles unavailable {cap}]"
+    if not names:
+        return "  [AUTO-BUY: ACTIVE - but NO products have auto-buy enabled]"
+    return f"  [AUTO-BUY: ACTIVE - Auto-buying: {' + '.join(names)} {cap}]"
+
+
 def find_next_queued_customer(truck_price=None):
     """Return the next eligible nonprofit row from the QuickBeed-synced
     customers table, or None if nobody is waiting.
@@ -431,11 +457,15 @@ def mark_customer_in_flight(customer_id, hold_minutes=10):
 
 
 def mark_customer_assigned(customer_id, status, cooldown_days=7):
-    """Bookkeeping after an autobuy attempt completes.
+    """Release the in-flight reservation after an autobuy attempt completes.
 
-    On SUCCESS: long cooldown so the next available truck rotates to
-    someone else. On any other outcome: clear the in-flight reservation
-    (cooldown_until = NULL) so the customer is eligible again next scan.
+    The roster engine does its own outcome bookkeeping for whichever org
+    it ACTUALLY purchased for — including writing the real post-purchase
+    cooldown to this table (_sync_cooldown_to_dashboard) — and the org it
+    picks is not guaranteed to be the customer this monitor reserved. So
+    this only ever clears SHORT holds (the ~10-min in-flight reservation
+    from mark_customer_in_flight); a real multi-day cooldown is never
+    touched, whatever the status says.
     """
     if not customer_id:
         return
@@ -445,23 +475,17 @@ def mark_customer_assigned(customer_id, status, cooldown_days=7):
             _sys.path.insert(0, "/app/missioncontrol")
         from db import get_conn as _get_conn  # type: ignore
         with _get_conn() as c:
-            if status == "SUCCESS":
-                c.execute("""
-                    UPDATE customers
-                    SET last_used_at = datetime('now'),
-                        last_purchase_at = datetime('now'),
-                        cooldown_until = datetime('now', '+' || ? || ' days')
-                    WHERE id = ?
-                """, (int(cooldown_days), customer_id))
-            else:
-                # Failed/missed/manual — release the in-flight reservation
-                # so the customer is available for the next attempt.
-                c.execute("""
-                    UPDATE customers
-                    SET last_used_at = datetime('now'),
-                        cooldown_until = NULL
-                    WHERE id = ?
-                """, (customer_id,))
+            cur = c.execute("""
+                UPDATE customers
+                SET last_used_at = datetime('now'),
+                    cooldown_until = NULL
+                WHERE id = ?
+                  AND cooldown_until IS NOT NULL
+                  AND cooldown_until <= datetime('now', '+15 minutes')
+            """, (customer_id,))
+        if cur.rowcount:
+            log_cron(f"  [QUEUE] in-flight reservation released for {customer_id} "
+                     f"(outcome: {status})")
     except Exception as e:
         log_cron(f"  [QUEUE] customer bookkeeping failed: {e}")
 
@@ -1464,7 +1488,7 @@ def main():
     try:
         autobuy_active = is_autobuy_active()
         if autobuy_active:
-            print("  [AUTO-BUY: ACTIVE - Auto-buying: New Unsorted + Variety + Houseware Truckloads (max $6,400)]")
+            print(_autobuy_banner())
             log_cron("Auto-buy active")
         else:
             print("  [AUTO-BUY: INACTIVE - alert only mode]")
@@ -1624,6 +1648,11 @@ def main():
                         log_cron(err)
                         send_error_alert(err)
                         action_taken = f"ROSTER ERROR: {e}"
+                    # Release the in-flight reservation taken at QUEUE ASSIGN.
+                    # The roster engine bookkeeps the org it actually bought
+                    # for (incl. the dashboard cooldown write-back); this only
+                    # clears the short hold and never a real cooldown.
+                    mark_customer_assigned(queued_customer.get('id'), action_taken)
                     if truck_name not in state["alerted"]:
                         state["alerted"].append(truck_name)
                     alert_sent = True
