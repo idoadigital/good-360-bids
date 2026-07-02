@@ -20,6 +20,19 @@ try:
     import settings_bootstrap  # noqa: F401
 except Exception:
     pass
+try:
+    import feature_flags
+    _NOTIFICATIONS_ON = feature_flags.notifications_enabled()
+except Exception:
+    _NOTIFICATIONS_ON = True
+if not _NOTIFICATIONS_ON:
+    # Non-prod environments (ENABLE_NOTIFICATIONS=false) must never run a
+    # getUpdates poller — it would 409-conflict with prod's bot and could
+    # answer operator commands from the wrong environment.
+    import time as _t
+    print("[TELEGRAM_BOT] ENABLE_NOTIFICATIONS=false — bot disabled, idling.", flush=True)
+    while True:
+        _t.sleep(3600)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 if not TELEGRAM_TOKEN:
     # Bot is optional — if no token is configured, idle the container so it

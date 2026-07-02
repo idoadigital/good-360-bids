@@ -1046,6 +1046,9 @@ def _alert_blocked_purchase(org_name: str, truck_title: str, reason: str) -> Non
     import requests as _requests
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     chat = (os.environ.get("TELEGRAM_OPERATOR_CHAT_ID") or "").strip()
+    import feature_flags  # repo root is on sys.path (see module top)
+    if not feature_flags.notifications_enabled():
+        token = chat = ""  # skip send; notifications_log still records it
     msg = ("🚫 <b>PURCHASE BLOCKED — approval gate</b>\n"
            f"Org: <b>{_html.escape(str(org_name))}</b>\n"
            f"Truck: {_html.escape(str(truck_title))}\n"
@@ -1124,6 +1127,9 @@ def _alert_payment_failure(org_name: str, truck_title: str, error: str) -> None:
     import requests as _requests
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     chat = (os.environ.get("TELEGRAM_OPERATOR_CHAT_ID") or "").strip()
+    import feature_flags  # repo root is on sys.path (see module top)
+    if not feature_flags.notifications_enabled():
+        token = chat = ""  # skip send; notifications_log still records it
     msg = ("💳 <b>PAYMENT FAILED — transaction stopped</b>\n"
            f"Org: <b>{_html.escape(str(org_name))}</b>\n"
            f"Truck: {_html.escape(str(truck_title))}\n"

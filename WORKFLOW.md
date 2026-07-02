@@ -16,6 +16,7 @@ feature.podhost.club staging.podhost.club podhost.club
 | URL | https://podhost.club | https://staging.podhost.club | https://feature.podhost.club |
 | Auto-buy | **ENABLED** | disabled (`ENABLE_AUTO_BUY=false`) | disabled |
 | Good360 scanning | **ENABLED** | disabled (`ENABLE_URL_SCANNING=false`) | disabled |
+| Notifications (Telegram/email/SMS) | **ENABLED** | disabled (`ENABLE_NOTIFICATIONS=false`) | disabled |
 | Telegram bot | runs | not deployed (getUpdates token conflict) | not deployed |
 | Databases | own `workdir`/`roster_data` volumes | own (empty at first) | own (empty at first) |
 | Local ports (127.0.0.1) | daemon 5002, intake 5000 | daemon 15002, intake 15000 | daemon 25002, intake 25000 |
@@ -70,6 +71,21 @@ any Good360 requests. It still writes its heartbeat (status
 `scanning_disabled`) so the container healthcheck stays green and the
 watchdog stays quiet.
 
+`ENABLE_NOTIFICATIONS=false` blocks every outbound notification transport so
+only production ever messages anyone (no double alerts from staging/feature):
+- monitor: all Telegram sends + all alert emails (error, alert, urgent-manual,
+  purchase-confirmation, checkout-failure)
+- watchdog + report + autobuy script Telegram sends
+- roster `notifier.py` `send_email()` / `send_sms()` (customer notifications)
+- missioncontrol `order_verifier` / `customer_readiness` operator Telegrams
+- `autobuy_v2` approval-gate / payment-failure Telegrams (still recorded in
+  the notifications log with delivered=false, so staging shows *what would
+  have been sent*)
+- intake form Telegram + email
+- telegram-bot idles instead of polling (a second getUpdates poller on the
+  same token would 409-conflict with prod's)
+Skipped sends log a greppable `[NOTIFICATIONS DISABLED]` line.
+
 Testing a checkout flow in non-prod: set `SANDBOX_MODE=true` **and**
 explicitly flip `ENABLE_AUTO_BUY=true` in that env's `.env`, then recreate the
 containers. Never put real cards or real purchase credentials in a non-prod
@@ -82,6 +98,7 @@ Each checkout has its own gitignored `.env`. Staging/feature must set:
 ```
 ENABLE_AUTO_BUY=false
 ENABLE_URL_SCANNING=false
+ENABLE_NOTIFICATIONS=false
 COMPOSE_PROJECT_NAME=good-360-bids-staging          # or -feature
 DASHBOARD_PROJECT_DIR=/root/good-360-bids-staging   # or -feature
 MISSIONCONTROL_URL=http://missioncontrol-staging:5001            # or -feature
@@ -99,6 +116,27 @@ python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).deco
 `COMPOSE_PROJECT_NAME` + `DASHBOARD_PROJECT_DIR` also scope the dashboard's
 Apply/Logs/Status docker operations to that environment's own stack — a
 staging dashboard cannot recreate prod containers.
+
+## Why staging/feature settings can never leak into main
+
+Everything that makes staging/feature different lives OUTSIDE git, so a
+`staging → main` merge cannot carry it into production:
+
+- **`.env` files** — gitignored. All kill-switches (`ENABLE_*=false`), fake
+  cards, blanked tokens, and per-env project names exist only in each
+  checkout's `.env`, which never enters a commit.
+- **Databases / volumes** — per-compose-project Docker volumes, not in git.
+- **Code is identical on purpose** — the same code runs in all three
+  environments; behavior differs only via env vars whose *defaults are
+  production behavior* (unset = enabled). Merging code to main changes
+  nothing for prod.
+- **`docker-compose.staging.yml` / `docker-compose.feature.yml` ARE on main
+  by design** — they're inert there (prod only ever uses
+  `docker-compose.yml`).
+- **Deploy-time guardrails**: `deploy-prod.sh` refuses to deploy if prod's
+  `.env` has any `ENABLE_*` kill-switch set to false; `deploy-staging.sh` /
+  `deploy-feature.sh` refuse unless all three are false. A mixed-up .env is
+  caught before any container restarts.
 
 ## Fresh environment bootstrap
 

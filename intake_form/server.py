@@ -13,6 +13,11 @@ from email.mime.text import MIMEText
 import requests
 from flask import Flask, jsonify, request, send_from_directory
 
+# feature_flags lives in the repo root (one level up from this script's dir).
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import feature_flags  # noqa: E402
+
 app = Flask(__name__, static_folder='.')
 
 FORM_DATA_DIR = f"{os.environ.get('WORKDIR', '/a0/usr/workdir')}/intake_form/submissions"
@@ -82,6 +87,9 @@ def handle_submit():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 def send_telegram(data):
+    if not feature_flags.notifications_enabled():
+        print(feature_flags.notifications_blocked_msg("intake telegram"))
+        return
     try:
         org_name = data.get('legal_name', data.get('org_legal_name', 'N/A'))
         contact = data.get('contact_name', data.get('primary_contact', 'N/A'))
@@ -142,6 +150,9 @@ def send_telegram(data):
         print(f'✗ Telegram error: {e}')
 
 def send_email_notification(data):
+    if not feature_flags.notifications_enabled():
+        print(feature_flags.notifications_blocked_msg("intake email"))
+        return
     try:
         org_name = data.get('legal_name', 'N/A')
         ref_id = data.get('submission_id', 'N/A')

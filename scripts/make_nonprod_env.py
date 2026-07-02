@@ -65,6 +65,7 @@ def main() -> int:
     overrides = {
         "ENABLE_AUTO_BUY": "false",
         "ENABLE_URL_SCANNING": "false",
+        "ENABLE_NOTIFICATIONS": "false",
         "COMPOSE_PROJECT_NAME": f"good-360-bids-{args.env}",
         "DASHBOARD_PROJECT_DIR": checkout,
         "MISSIONCONTROL_URL": f"http://missioncontrol-{args.env}:5001",

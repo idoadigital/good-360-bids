@@ -42,3 +42,17 @@ def auto_buy_enabled() -> bool:
 def url_scanning_enabled() -> bool:
     """Master switch for the Good360 scan loop."""
     return flag_enabled("ENABLE_URL_SCANNING", default=True)
+
+
+def notifications_enabled() -> bool:
+    """Master switch for every outbound notification transport (Telegram,
+    email/SMTP, SMS). Only production may send — staging/feature set
+    ENABLE_NOTIFICATIONS=false so operators and customers never get
+    double/phantom messages from non-prod stacks."""
+    return flag_enabled("ENABLE_NOTIFICATIONS", default=True)
+
+
+def notifications_blocked_msg(channel: str) -> str:
+    """Uniform log line for skipped sends, greppable across services."""
+    return (f"[NOTIFICATIONS DISABLED] {channel} send skipped "
+            "(ENABLE_NOTIFICATIONS=false in this environment)")

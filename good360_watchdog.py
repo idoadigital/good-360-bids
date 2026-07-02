@@ -10,6 +10,7 @@ import requests
 import sys as _sys
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sandbox  # noqa: E402  (sandbox-mode alert prefix)
+import feature_flags  # noqa: E402
 
 # Config
 # All state lives in the shared workdir volume so the watchdog (which has no
@@ -30,6 +31,9 @@ def log_alert(msg):
         f.write(f"[{datetime.now(ET).strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
 
 def send_telegram_alert(message):
+    if not feature_flags.notifications_enabled():
+        print(feature_flags.notifications_blocked_msg("telegram"))
+        return
     message = sandbox.decorate_alert(message)
     delivered = False
     err = None

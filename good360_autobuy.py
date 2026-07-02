@@ -324,6 +324,9 @@ CHAT_ID = _os.environ.get('TELEGRAM_GROUP_HOPE4HUMANITY', '')
 
 def send_telegram(message):
     """Send alert via Telegram"""
+    if not feature_flags.notifications_enabled():
+        print(feature_flags.notifications_blocked_msg("telegram"))
+        return
     message = sandbox.decorate_alert(message)
     delivered = False
     err = None

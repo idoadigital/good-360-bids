@@ -17,8 +17,8 @@ if [ ! -f .env ]; then
     exit 1
 fi
 # Prod must NOT have the kill-switches set to false.
-if grep -qE '^ENABLE_(AUTO_BUY|URL_SCANNING)=false' .env; then
-    echo "ERROR: prod .env has ENABLE_AUTO_BUY/ENABLE_URL_SCANNING=false — fix before deploying" >&2
+if grep -qE '^ENABLE_(AUTO_BUY|URL_SCANNING|NOTIFICATIONS)=false' .env; then
+    echo "ERROR: prod .env has an ENABLE_* kill-switch set to false — fix before deploying" >&2
     exit 1
 fi
 

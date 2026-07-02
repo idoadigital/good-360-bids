@@ -21,6 +21,25 @@ from typing import Any
 
 logger = logging.getLogger("notifier")
 
+
+def _notifications_enabled() -> bool:
+    """Environment master switch (ENABLE_NOTIFICATIONS). Only production may
+    send — staging/feature set it to false so customers/operators never get
+    duplicate messages from non-prod stacks. Local import with a repo-root
+    path fallback because this module is loaded from several entry points."""
+    try:
+        import sys as _sys
+        _root = str(Path(__file__).resolve().parent.parent)
+        if _root not in _sys.path:
+            _sys.path.insert(0, _root)
+        import feature_flags
+        return feature_flags.notifications_enabled()
+    except Exception:
+        # Fail closed only for explicit "false" — mirror feature_flags parsing.
+        return os.environ.get("ENABLE_NOTIFICATIONS", "true").strip().lower() not in (
+            "false", "0", "no", "off")
+
+
 # ─── DB Path ──────────────────────────────────────────────────────────────────
 DB_PATH = Path(__file__).parent / "db" / "roster.db"
 
@@ -115,6 +134,11 @@ def send_email(to_email: str, subject: str, body_html: str,
     Send an email via SMTP.
     Returns True on success, False on failure.
     """
+    if not _notifications_enabled():
+        logger.info("[NOTIFICATIONS DISABLED] email send skipped "
+                    f"(ENABLE_NOTIFICATIONS=false): {to_email} / {subject!r}")
+        return False
+
     if smtp_config is None:
         smtp_config = get_smtp_config()
 
@@ -188,6 +212,11 @@ def send_sms(to_phone_e164: str, body: str) -> bool:
     Returns True on success, False on failure.
     Requires: twilio_account_sid, twilio_auth_token, twilio_from_number in system_config.
     """
+    if not _notifications_enabled():
+        logger.info("[NOTIFICATIONS DISABLED] SMS send skipped "
+                    f"(ENABLE_NOTIFICATIONS=false): {to_phone_e164}")
+        return False
+
     account_sid = get_config("twilio_account_sid")
     auth_token  = get_config("twilio_auth_token")
     from_number = get_config("twilio_from_number")

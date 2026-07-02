@@ -22,6 +22,10 @@ grep -q '^ENABLE_URL_SCANNING=false' .env || {
     echo "ERROR: refusing to deploy — ENABLE_URL_SCANNING must be false in staging" >&2
     exit 1
 }
+grep -q '^ENABLE_NOTIFICATIONS=false' .env || {
+    echo "ERROR: refusing to deploy — ENABLE_NOTIFICATIONS must be false in staging" >&2
+    exit 1
+}
 
 git fetch origin
 git checkout staging

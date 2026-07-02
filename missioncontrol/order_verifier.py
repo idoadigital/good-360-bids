@@ -22,6 +22,21 @@ from pathlib import Path
 logger = logging.getLogger("order_verifier")
 
 ROSTER_DB = os.environ.get("ROSTER_DB_PATH", "/app/good360_roster/db/roster.db")
+def _notifications_enabled() -> bool:
+    """ENABLE_NOTIFICATIONS env master switch (false in staging/feature).
+    feature_flags lives in the repo root — one level above this package."""
+    try:
+        import sys
+        _root = str(Path(__file__).resolve().parent.parent)
+        if _root not in sys.path:
+            sys.path.insert(0, _root)
+        import feature_flags
+        return feature_flags.notifications_enabled()
+    except Exception:
+        return os.environ.get("ENABLE_NOTIFICATIONS", "true").strip().lower() not in (
+            "false", "0", "no", "off")
+
+
 WORKDIR = os.environ.get("WORKDIR", "/app/workdir")
 ORDERS_URL = "https://catalog.good360.org/marketplace/my-account/orders"
 STATE_FILE = f"{WORKDIR}/order_verifier_state.json"
@@ -124,6 +139,8 @@ def _release_lock() -> None:
 
 def _alert_operator(text: str) -> None:
     """Best-effort Telegram to the operator chat."""
+    if not _notifications_enabled():
+        return
     import requests
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     chat = (os.environ.get("TELEGRAM_OPERATOR_CHAT_ID") or "").strip()

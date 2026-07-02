@@ -81,6 +81,7 @@ services:
     volumes:
       - workdir:/app/workdir
       - ./good360_watchdog.py:/app/good360_watchdog.py:ro
+      - ./feature_flags.py:/app/feature_flags.py:ro
 
   missioncontrol-staging:
     image: good360-monitor:staging

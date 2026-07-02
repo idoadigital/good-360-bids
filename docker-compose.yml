@@ -66,6 +66,7 @@ services:
       # Bind-mount so watchdog edits land without an image rebuild
       # (matches the pattern used for monitor / telegram-bot).
       - ./good360_watchdog.py:/app/good360_watchdog.py:ro
+      - ./feature_flags.py:/app/feature_flags.py:ro
 
   telegram-bot:
     image: good360-monitor:local
@@ -78,6 +79,7 @@ services:
       # Bind-mount the moving Python so settings_bootstrap + token guard
       # land without an image rebuild.
       - ./good360_telegram_bot.py:/app/good360_telegram_bot.py:ro
+      - ./feature_flags.py:/app/feature_flags.py:ro
       - ./settings_bootstrap.py:/app/settings_bootstrap.py:ro
       - ./missioncontrol:/app/missioncontrol:ro
 

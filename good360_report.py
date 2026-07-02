@@ -21,6 +21,7 @@ LOG_FILE = f"{os.environ.get('WORKDIR', '/a0/usr/workdir')}/good360_run_log.json
 import sys as _sys
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sandbox  # noqa: E402  (sandbox-mode URL routing)
+import feature_flags  # noqa: E402
 GOOD360_URL = sandbox.good360_browse_url()
 REPORT_HOURS = 6
 
@@ -28,6 +29,9 @@ REPORT_HOURS = 6
 TELEGRAM_CHAT_IDS = ["-1003866351492", "-5089630277"]  # Hope4Humanity + Reviving Homes
 
 def send_telegram(message):
+    if not feature_flags.notifications_enabled():
+        print(feature_flags.notifications_blocked_msg("telegram"))
+        return
     # Truncate if too long (Telegram limit: 4096 chars)
     if len(message) > 4000:
         # Keep header, truncate body, add note
@@ -161,6 +165,9 @@ def main():
     """
 
     # Send Email
+    if not feature_flags.notifications_enabled():
+        print(feature_flags.notifications_blocked_msg("report email"))
+        return
     msg = MIMEMultipart("alternative")
     msg["Subject"] = f"📊 Good360 Monitor — 6-Hour Report | {now_str}"
     msg["From"] = SMTP_USER

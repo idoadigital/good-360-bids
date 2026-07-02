@@ -38,6 +38,23 @@ import requests
 
 from db import get_conn
 
+
+def _notifications_enabled() -> bool:
+    """ENABLE_NOTIFICATIONS env master switch (false in staging/feature).
+    feature_flags lives in the repo root — one level above this package."""
+    try:
+        import os.path
+        import sys
+        _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if _root not in sys.path:
+            sys.path.insert(0, _root)
+        import feature_flags
+        return feature_flags.notifications_enabled()
+    except Exception:
+        return os.environ.get("ENABLE_NOTIFICATIONS", "true").strip().lower() not in (
+            "false", "0", "no", "off")
+
+
 SWEEP_STATE_KEY = "last_readiness_sweep_at"
 SWEEP_INTERVAL_S = 24 * 3600
 SWEEP_STATUSES = ("active", "onboarding")
@@ -256,6 +273,8 @@ def _alert_operator(rec: dict, result: dict, new_blockers: list[str]) -> None:
     delivered, err = False, None
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     chat = (os.environ.get("TELEGRAM_OPERATOR_CHAT_ID") or "").strip()
+    if not _notifications_enabled():
+        token = chat = ""  # fall through so the skip is still recorded below
     if token and chat:
         try:
             resp = requests.post(

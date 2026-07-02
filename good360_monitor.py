@@ -665,6 +665,9 @@ def write_heartbeat(status="running"):
 # ============================================================
 def send_error_alert(error_message):
     """Send notification when script encounters errors"""
+    if not feature_flags.notifications_enabled():
+        print(feature_flags.notifications_blocked_msg("error-alert email"))
+        return False
     timestamp = datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d %H:%M:%S")
     subject = sandbox.alert_prefix() + "Good360 Monitor ERROR Alert"
 
@@ -779,6 +782,9 @@ def send_telegram(message):
     env slots ship empty in fresh installs. When no org groups are set we
     fall back to TELEGRAM_OPERATOR_CHAT_ID so alerts still go somewhere
     rather than silently dropping to /dev/null."""
+    if not feature_flags.notifications_enabled():
+        print(feature_flags.notifications_blocked_msg("telegram"))
+        return False
     message = sandbox.decorate_alert(message)
     url = "https://api.telegram.org/bot" + TELEGRAM_TOKEN + "/sendMessage"
     any_delivered = False
@@ -836,6 +842,9 @@ def _fire_and_forget(label, fn, *args, **kwargs):
 
 
 def send_alert_email(available_trucks, subject_prefix="ALERT", extra_note=""):
+    if not feature_flags.notifications_enabled():
+        print(feature_flags.notifications_blocked_msg("email"))
+        return False
     msg = MIMEMultipart("alternative")
     msg["Subject"] = sandbox.alert_prefix() + subject_prefix + ": Amazon Truckload NOW AVAILABLE on Good360!"
     msg["From"] = SMTP_USER
@@ -898,6 +907,9 @@ def get_org_telegram_group(org_key):
 
 def send_telegram_to_org(org_key, message):
     """Send Telegram to specific org's group"""
+    if not feature_flags.notifications_enabled():
+        print(feature_flags.notifications_blocked_msg("telegram"))
+        return False
     message = sandbox.decorate_alert(message)
     chat_id = get_org_telegram_group(org_key)
     delivered = False
@@ -929,6 +941,9 @@ def send_telegram_alert(available_trucks, extra_note=""):
     send_telegram(message)
 
 def send_urgent_manual_alert(truck_name, admin_fee, truck_url):
+    if not feature_flags.notifications_enabled():
+        print(feature_flags.notifications_blocked_msg("urgent-manual alert"))
+        return False
     now = datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d %H:%M:%S")
     subject = "URGENT ACTION REQUIRED - $" + str(admin_fee) + " Exceeds Auto-Pay Limit"
     html = """<html><body style='font-family:Arial,sans-serif;max-width:600px;margin:auto'>
@@ -999,6 +1014,9 @@ def _details_lines(details, org_config=None):
     return lines
 
 def send_purchase_confirmation(truck_name, admin_fee, org_name=None, details=None, org_config=None):
+    if not feature_flags.notifications_enabled():
+        print(feature_flags.notifications_blocked_msg("purchase-confirmation alert"))
+        return False
     now = datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d %H:%M:%S")
     subject = "AUTO-PURCHASE COMPLETE - " + truck_name
     org_line = f"<p><strong>Organization:</strong> {org_name}</p>" if org_name else ""
@@ -1044,6 +1062,9 @@ def send_purchase_confirmation(truck_name, admin_fee, org_name=None, details=Non
     print("Purchase confirmation sent for: " + truck_name)
 
 def send_checkout_failure_alert(truck_name, truck_url, status, message, org_name=None, details=None, org_config=None):
+    if not feature_flags.notifications_enabled():
+        print(feature_flags.notifications_blocked_msg("checkout-failure alert"))
+        return False
     now = datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d %H:%M:%S")
     subject = "AUTO-PURCHASE FAILED - " + truck_name
     safe_message = _redact_sensitive_text(message, org_config)
