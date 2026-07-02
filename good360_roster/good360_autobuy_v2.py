@@ -701,18 +701,39 @@ def _run_checkout_via_daemon(org: OrgContext, truck: TruckContext,
     logger.info("[DAEMON] dispatching deterministic checkout · org=%s truck=%s card=****%s",
                 org.org_id, truck.truck_event_id, str(payment_card["card_number"])[-4:])
     try:
+        # (connect, read): a dead/sealed daemon must fail in seconds, not
+        # minutes — trucks sell out in ~2s. The read side stays long because
+        # a real checkout legitimately takes minutes. (June 16 2026: a wedged
+        # daemon + a flat 420s timeout burned 7 minutes per card on a truck
+        # that was long gone.)
         resp = _requests.post(f"{daemon_url}/test_checkout", json={
             "org_key": f"qb_{org.org_id}",
             "org_config": org_config,
             "truck_name": truck.truck_title,
             "truck_url": truck.truck_url,
             "force_login": True,
-        }, timeout=420)
+        }, timeout=(5, 420))
         payload = resp.json()
+    except (_requests.exceptions.ConnectionError, _requests.exceptions.Timeout) as exc:
+        # Daemon unreachable or unresponsive — an INFRASTRUCTURE failure,
+        # not a card verdict. Distinct status so the card ladder stops
+        # (retrying other cards through a dead daemon just burns time, and a
+        # read-timeout leaves the order state unknown — retrying could
+        # double-purchase) and so it can never be recorded as a card decline.
+        return CheckoutResult(
+            success=False, status="daemon_unreachable", mode="auto_buy",
+            error_message=f"[DAEMON-UNREACHABLE] {type(exc).__name__}: {exc}")
     except Exception as exc:  # noqa: BLE001
         return CheckoutResult(
             success=False, status="failed_checkout", mode="auto_buy",
             error_message=f"[DAEMON] checkout dispatch failed: {type(exc).__name__}: {exc}")
+
+    if resp.status_code == 503:
+        # Daemon answered but its browser worker is busy/stuck — same
+        # infrastructure semantics as unreachable: stop the card ladder.
+        return CheckoutResult(
+            success=False, status="daemon_unreachable", mode="auto_buy",
+            error_message=f"[DAEMON-UNREACHABLE] busy/stuck: {payload.get('message') or ''}")
 
     d_status = (payload.get("status") or "").upper()
     d_msg = payload.get("message") or ""
@@ -1370,6 +1391,23 @@ def attempt_purchase(org_id: int, truck_event_id: int,
             return result
 
         else:
+            if result.status == "daemon_unreachable":
+                # INFRASTRUCTURE failure, not a card verdict: the daemon is
+                # down/sealed/stuck. Do NOT record a decline against the
+                # customer's card, and do NOT walk the remaining cards —
+                # they'd all burn time against the same dead daemon (and
+                # after a read-timeout the order state is unknown, so a
+                # retry risks a double purchase). Surface it loudly instead.
+                update_purchase_attempt(
+                    attempt_id,
+                    status="failed_checkout",
+                    error_message=result.error_message,
+                    screenshot_path=result.screenshot_path,
+                )
+                logger.error(f"DAEMON UNREACHABLE — aborting card ladder for org {org_id}: "
+                             f"{result.error_message}")
+                return result
+
             # Card declined / checkout failed
             if card.get("id") is not None:
                 record_card_decline(card["id"])
