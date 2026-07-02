@@ -76,7 +76,8 @@ def get_queue_position(org_id: int) -> int:
         return row[0] if row else 0
 
 
-def find_next_available_org(truck_category: str = None, truck_price: float = None) -> sqlite3.Row | None:
+def find_next_available_org(truck_category: str = None, truck_price: float = None,
+                            exclude_org_ids: tuple = ()) -> sqlite3.Row | None:
     """Find the next org in the queue that is active (not in cooldown).
 
     The operator's manual order wins: manual_rank (synced from the
@@ -85,6 +86,11 @@ def find_next_available_org(truck_category: str = None, truck_price: float = Non
     (queue_position ASC, position 1 = longest waiting). Eligibility filters
     (status, cooldown, auto_buy_global) apply either way — manual order is
     an ordering hint, never an eligibility bypass.
+
+    exclude_org_ids: orgs already tried (and failed) for the CURRENT truck —
+    lets the orchestrator advance down the roster within one truck event.
+    Failures don't set cooldown_until, so without an explicit exclusion this
+    would keep returning the same failed org forever.
     Returns the org Row or None.
     """
     # Release expired cooldowns AT THE POINT OF PICK. The background
@@ -98,18 +104,25 @@ def find_next_available_org(truck_category: str = None, truck_price: float = Non
     except Exception as e:  # noqa: BLE001
         logger.warning(f"expired-cooldown sweep failed (pick continues): {e}")
     cooldown_days = get_cooldown_days()
+    exclude = [int(i) for i in exclude_org_ids]
+    # NB: "NOT IN ()" is a syntax error and "NOT IN (NULL)" matches nothing,
+    # so the clause is only added when there's something to exclude.
+    exclude_clause = ""
+    if exclude:
+        exclude_clause = f"AND n.id NOT IN ({','.join('?' for _ in exclude)})"
     with get_db_connection() as conn:
         now = datetime.utcnow().isoformat()
         cutoff = (datetime.utcnow() - timedelta(days=cooldown_days)).isoformat()
-        row = conn.execute("""
+        row = conn.execute(f"""
             SELECT n.* FROM nonprofits n
             WHERE n.status = 'active'
               AND (n.cooldown_until IS NULL OR n.cooldown_until < ?)
               AND n.auto_buy_global = 1
+              {exclude_clause}
             ORDER BY (n.manual_rank IS NULL), n.manual_rank ASC,
                      n.queue_position ASC
             LIMIT 1
-        """, (now,)).fetchone()
+        """, (now, *exclude)).fetchone()
         return row
 
 
