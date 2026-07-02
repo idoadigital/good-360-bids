@@ -39,7 +39,27 @@ from purchase_lock import exclusive_purchase_lock
 
 # Environment master switch — staging/feature stacks set
 # ENABLE_AUTO_BUY=false and this script must refuse to run there.
-import feature_flags
+try:
+    import feature_flags
+except ImportError:
+    # Stale image/mount combo (old container recreated from a pinned compose
+    # file without the feature_flags.py mount). Same semantics, env-only.
+    import os as _ff_os
+    import types as _ff_t
+
+    def _ff_flag(name):
+        return _ff_os.environ.get(name, "true").strip().lower() not in (
+            "false", "0", "no", "off")
+
+    feature_flags = _ff_t.SimpleNamespace(
+        flag_enabled=lambda name, default=True: _ff_flag(name),
+        auto_buy_enabled=lambda: _ff_flag("ENABLE_AUTO_BUY"),
+        url_scanning_enabled=lambda: _ff_flag("ENABLE_URL_SCANNING"),
+        notifications_enabled=lambda: _ff_flag("ENABLE_NOTIFICATIONS"),
+        notifications_blocked_msg=lambda ch: (
+            f"[NOTIFICATIONS DISABLED] {ch} send skipped "
+            "(ENABLE_NOTIFICATIONS=false in this environment)"),
+    )
 
 # Load config. The JSON file is .gitignored — fresh deployments don't have it,
 # and modern deployments source creds from env (.env / dashboard settings store)

@@ -1046,8 +1046,13 @@ def _alert_blocked_purchase(org_name: str, truck_title: str, reason: str) -> Non
     import requests as _requests
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     chat = (os.environ.get("TELEGRAM_OPERATOR_CHAT_ID") or "").strip()
-    import feature_flags  # repo root is on sys.path (see module top)
-    if not feature_flags.notifications_enabled():
+    try:
+        import feature_flags  # repo root is on sys.path (see module top)
+        _notif_on = feature_flags.notifications_enabled()
+    except ImportError:  # stale image/mount combo — env-only fallback
+        _notif_on = os.environ.get("ENABLE_NOTIFICATIONS", "true").strip().lower() not in (
+            "false", "0", "no", "off")
+    if not _notif_on:
         token = chat = ""  # skip send; notifications_log still records it
     msg = ("🚫 <b>PURCHASE BLOCKED — approval gate</b>\n"
            f"Org: <b>{_html.escape(str(org_name))}</b>\n"
@@ -1127,8 +1132,13 @@ def _alert_payment_failure(org_name: str, truck_title: str, error: str) -> None:
     import requests as _requests
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     chat = (os.environ.get("TELEGRAM_OPERATOR_CHAT_ID") or "").strip()
-    import feature_flags  # repo root is on sys.path (see module top)
-    if not feature_flags.notifications_enabled():
+    try:
+        import feature_flags  # repo root is on sys.path (see module top)
+        _notif_on = feature_flags.notifications_enabled()
+    except ImportError:  # stale image/mount combo — env-only fallback
+        _notif_on = os.environ.get("ENABLE_NOTIFICATIONS", "true").strip().lower() not in (
+            "false", "0", "no", "off")
+    if not _notif_on:
         token = chat = ""  # skip send; notifications_log still records it
     msg = ("💳 <b>PAYMENT FAILED — transaction stopped</b>\n"
            f"Org: <b>{_html.escape(str(org_name))}</b>\n"
@@ -1207,8 +1217,13 @@ def attempt_purchase(org_id: int, truck_event_id: int,
     # Environment master switch — runs before anything else, including test
     # mode. Staging/feature stacks (ENABLE_AUTO_BUY=false) must never drive
     # a checkout, even with a fake card.
-    import feature_flags  # _REPO_ROOT is on sys.path (see module top)
-    if not feature_flags.auto_buy_enabled():
+    try:
+        import feature_flags  # _REPO_ROOT is on sys.path (see module top)
+        _auto_buy_on = feature_flags.auto_buy_enabled()
+    except ImportError:  # stale image/mount combo — env-only fallback
+        _auto_buy_on = os.environ.get("ENABLE_AUTO_BUY", "true").strip().lower() not in (
+            "false", "0", "no", "off")
+    if not _auto_buy_on:
         msg = "auto-buy disabled in this environment (ENABLE_AUTO_BUY=false)"
         logger.error(f"PURCHASE BLOCKED: {msg} — org_id={org_id}")
         # Same status the approval gate uses — downstream consumers
