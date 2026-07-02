@@ -1198,6 +1198,18 @@ def attempt_purchase(org_id: int, truck_event_id: int,
     code path against any customer without polluting real data or charging
     a real card.
     """
+    # Environment master switch — runs before anything else, including test
+    # mode. Staging/feature stacks (ENABLE_AUTO_BUY=false) must never drive
+    # a checkout, even with a fake card.
+    import feature_flags  # _REPO_ROOT is on sys.path (see module top)
+    if not feature_flags.auto_buy_enabled():
+        msg = "auto-buy disabled in this environment (ENABLE_AUTO_BUY=false)"
+        logger.error(f"PURCHASE BLOCKED: {msg} — org_id={org_id}")
+        # Same status the approval gate uses — downstream consumers
+        # (purchase_attempts, notifier mapping) already understand it.
+        return CheckoutResult(success=False, status="failed_checkout",
+                              mode="auto_buy", error_message=msg)
+
     test_mode = test_card_override is not None
     logger.info(f"Starting purchase: org_id={org_id}, truck_event_id={truck_event_id}"
                 f"{' [TEST MODE — fake card, side effects suppressed]' if test_mode else ''}")

@@ -16,6 +16,7 @@ from email.mime.text import MIMEText
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "good360_roster"))
 import settings_bootstrap  # noqa: F401
+import feature_flags
 
 ROSTER_ENABLED = os.environ.get("ROSTER_ENABLED", "false").strip().lower() in ("1", "true", "yes")
 ROSTER_DRY_RUN = os.environ.get("ROSTER_DRY_RUN", "false").strip().lower() in ("1", "true", "yes")
@@ -648,12 +649,12 @@ def append_run_log(timestamp, trucks, alert_sent, action=""):
 # ============================================================
 # WATCHDOG HEARTBEAT
 # ============================================================
-def write_heartbeat():
+def write_heartbeat(status="running"):
     """Write heartbeat file with timestamp to indicate script is running"""
     heartbeat = {
         "last_success": datetime.now(pytz.timezone("America/New_York")).isoformat(),
         "script": "good360_monitor.py",
-        "status": "running"
+        "status": status
     }
     with open(HEARTBEAT_FILE, "w") as f:
         json.dump(heartbeat, f, indent=2)
@@ -765,6 +766,10 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 def is_autobuy_active():
+    # Environment master switch: staging/feature set ENABLE_AUTO_BUY=false
+    # so those stacks can never purchase, regardless of dashboard toggles.
+    if not feature_flags.auto_buy_enabled():
+        return False
     return True
 
 def send_telegram(message):
@@ -1221,6 +1226,13 @@ def run_autobuy(truck_name, truck_url, admin_fee, org_key=None, org_config=None)
     into a self-healing fallback for when our deterministic selectors break
     on a Good360 DOM change.
     """
+    # Hard environment gate, independent of is_autobuy_active(): staging and
+    # feature stacks must never reach any checkout engine.
+    if not feature_flags.auto_buy_enabled():
+        msg = "Auto-buy disabled in this environment (ENABLE_AUTO_BUY=false)"
+        print("  [BLOCKED] " + msg)
+        return ("BLOCKED", msg, {"reason": "ENABLE_AUTO_BUY=false"})
+
     print("  Launching auto-buy for: " + truck_name)
     if org_key:
         org_name = org_config.get('name', org_key) if org_config else org_key
@@ -1934,8 +1946,20 @@ if __name__ == "__main__":
     # Trucks sell out in <2s, so each second of scan latency directly costs
     # purchases. Override via env if Good360 ever returns a rate-limit response.
     SCAN_INTERVAL = int(os.environ.get("MONITOR_INTERVAL_SECONDS") or "10")
+    _scan_disabled_logged = False
     while True:
         try:
+            if not feature_flags.url_scanning_enabled():
+                # Staging/feature environments run with ENABLE_URL_SCANNING=false:
+                # never touch the live Good360 site, but keep the heartbeat
+                # fresh so the container healthcheck stays green.
+                if not _scan_disabled_logged:
+                    print("[SCANNING DISABLED - ENABLE_URL_SCANNING=false] "
+                          "Idling; no Good360 requests will be made")
+                    _scan_disabled_logged = True
+                write_heartbeat(status="scanning_disabled")
+                time.sleep(SCAN_INTERVAL)
+                continue
             result = main()
             print("Result: " + result)
         except KeyboardInterrupt:

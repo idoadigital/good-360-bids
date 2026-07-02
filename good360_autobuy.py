@@ -37,6 +37,10 @@ from audit_log import audit as audit_event
 # serialises them so we never double-charge.
 from purchase_lock import exclusive_purchase_lock
 
+# Environment master switch — staging/feature stacks set
+# ENABLE_AUTO_BUY=false and this script must refuse to run there.
+import feature_flags
+
 # Load config. The JSON file is .gitignored — fresh deployments don't have it,
 # and modern deployments source creds from env (.env / dashboard settings store)
 # rather than this file. Treat the file as optional so a missing/empty config
@@ -1293,6 +1297,10 @@ def _autobuy_truck_inner(truck_name, truck_url, screenshot_dir):
         return 'FAILED', error_msg
 
 if __name__ == "__main__":
+    if not feature_flags.auto_buy_enabled():
+        print("BLOCKED: auto-buy disabled in this environment (ENABLE_AUTO_BUY=false)")
+        sys.exit(2)
+
     if len(sys.argv) < 3:
         print("Usage: python good360_autobuy.py <truck_name> <truck_url>")
         sys.exit(1)

@@ -1,0 +1,151 @@
+# docker-compose.staging.yml — STAGING environment.
+#
+# Runs from its own checkout (/root/good-360-bids-staging, `staging` branch)
+# as its own compose project with its own volumes (databases) and image tag.
+# Production at /root/good-360-bids is completely untouched by this stack.
+#
+#   cd /root/good-360-bids-staging
+#   docker compose -f docker-compose.staging.yml up -d --build
+#   (COMPOSE_PROJECT_NAME=good-360-bids-staging comes from .env)
+#
+# Differences from production (docker-compose.yml):
+#   - Image tag good360-monitor:staging — never clobbers prod's :local tag,
+#     so a staging build can't silently become prod's image on its next
+#     `up -d`.
+#   - .env sets ENABLE_AUTO_BUY=false and ENABLE_URL_SCANNING=false; the
+#     code gates in good360_monitor / good360_daemon / good360_autobuy* make
+#     purchases and Good360 scanning impossible here.
+#   - NO caddy service: prod's caddy is the single 80/443 edge and proxies
+#     staging.podhost.club to this stack's dashboard over the external
+#     `edge` network.
+#   - NO telegram-bot service: a second getUpdates poller on the same token
+#     would 409-conflict with prod's. Telegram env vars are blanked anyway.
+#   - Dashboard service is named `missioncontrol-staging` (not
+#     `missioncontrol`): compose registers the service name as a DNS alias
+#     on every attached network, and a second `missioncontrol` alias on the
+#     shared edge network could hijack prod caddy's upstream resolution.
+#   - Host ports bind to 127.0.0.1 only, in the 15xxx range.
+
+services:
+  monitor:
+    build: .
+    image: good360-monitor:staging
+    restart: always
+    init: true
+    command: python good360_monitor.py
+    env_file: .env
+    volumes:
+      - workdir:/app/workdir
+      - roster_data:/app/good360_roster/db
+      - ./missioncontrol:/app/missioncontrol:ro
+      - ./settings_bootstrap.py:/app/settings_bootstrap.py:ro
+      - ./good360_monitor.py:/app/good360_monitor.py:ro
+      - ./good360_autobuy.py:/app/good360_autobuy.py:ro
+      - ./feature_flags.py:/app/feature_flags.py:ro
+      - ./good360_devtools_agent.py:/app/good360_devtools_agent.py:ro
+      - ./good360_roster/good360_autobuy_v2.py:/app/good360_roster/good360_autobuy_v2.py:ro
+      - ./notifications_log.py:/app/notifications_log.py:ro
+      - ./sandbox.py:/app/sandbox.py:ro
+      - ./audit_log.py:/app/audit_log.py:ro
+      - ./purchase_lock.py:/app/purchase_lock.py:ro
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+  daemon:
+    image: good360-monitor:staging
+    restart: always
+    init: true
+    command: python good360_daemon.py
+    env_file: .env
+    volumes:
+      - workdir:/app/workdir
+      - roster_data:/app/good360_roster/db
+      - ./good360_daemon.py:/app/good360_daemon.py:ro
+      - ./purchase_lock.py:/app/purchase_lock.py:ro
+      - ./sandbox.py:/app/sandbox.py:ro
+      - ./feature_flags.py:/app/feature_flags.py:ro
+    ports:
+      - "127.0.0.1:15002:5002"
+    depends_on: [monitor]
+
+  watchdog:
+    image: good360-monitor:staging
+    restart: always
+    init: true
+    command: python good360_watchdog.py
+    env_file: .env
+    volumes:
+      - workdir:/app/workdir
+      - ./good360_watchdog.py:/app/good360_watchdog.py:ro
+
+  missioncontrol-staging:
+    image: good360-monitor:staging
+    restart: always
+    init: true
+    # Same gunicorn setup as prod's missioncontrol service; TLS terminates
+    # at prod caddy, this listens plain HTTP on docker networks only.
+    command: >-
+      gunicorn
+      --pythonpath /app/missioncontrol
+      --worker-class gthread
+      --workers 3
+      --threads 8
+      --bind 0.0.0.0:5001
+      --forwarded-allow-ips=*
+      --timeout 60
+      --graceful-timeout 30
+      --keep-alive 5
+      --access-logfile -
+      --error-logfile -
+      server_v2:app
+    env_file: .env
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "--max-time", "5", "http://127.0.0.1:5001/login"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    volumes:
+      - workdir:/app/workdir
+      - ./missioncontrol:/app/missioncontrol:ro
+      - ./good360_devtools_agent.py:/app/good360_devtools_agent.py:ro
+      - ./notifications_log.py:/app/notifications_log.py:ro
+      - ./settings_bootstrap.py:/app/settings_bootstrap.py:ro
+      - ./tls:/app/tls:ro
+      # Settings writer mutates this env's own .env (never prod's).
+      - ./.env:/app/.env
+      # The dashboard's Apply step re-runs compose against THIS project:
+      # COMPOSE_PROJECT_NAME + DASHBOARD_PROJECT_DIR in .env scope every
+      # docker operation to the staging stack.
+      - ./docker-compose.staging.yml:/app/docker-compose.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /root/good-360-bids-staging:/root/good-360-bids-staging:ro
+      - roster_data:/app/good360_roster/db
+    networks:
+      - default
+      # Reachable by prod caddy for staging.podhost.club.
+      - edge
+    expose:
+      - "5001"
+
+  intake:
+    image: good360-monitor:staging
+    restart: always
+    command: python intake_form/server.py
+    env_file: .env
+    volumes:
+      - workdir:/app/workdir
+    ports:
+      - "127.0.0.1:15000:5000"
+
+volumes:
+  workdir:
+  roster_data:
+
+networks:
+  edge:
+    external: true

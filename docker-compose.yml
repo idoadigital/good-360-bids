@@ -22,6 +22,7 @@ services:
       - ./settings_bootstrap.py:/app/settings_bootstrap.py:ro
       - ./good360_monitor.py:/app/good360_monitor.py:ro
       - ./good360_autobuy.py:/app/good360_autobuy.py:ro
+      - ./feature_flags.py:/app/feature_flags.py:ro
       - ./good360_devtools_agent.py:/app/good360_devtools_agent.py:ro
       - ./good360_roster/good360_autobuy_v2.py:/app/good360_roster/good360_autobuy_v2.py:ro
       - ./notifications_log.py:/app/notifications_log.py:ro
@@ -49,6 +50,7 @@ services:
       - ./good360_daemon.py:/app/good360_daemon.py:ro
       - ./purchase_lock.py:/app/purchase_lock.py:ro
       - ./sandbox.py:/app/sandbox.py:ro
+      - ./feature_flags.py:/app/feature_flags.py:ro
     ports:
       - "5002:5002"
     depends_on: [monitor]
@@ -159,8 +161,16 @@ services:
     image: caddy:2
     restart: always
     # Caddy binds 80 + 443 on the host and terminates TLS for
-    # podhost.club. ACME HTTP-01 challenge needs port 80; the redirect to
-    # https is added automatically.
+    # podhost.club AND the staging./feature. subdomains. It reaches the
+    # non-prod dashboards over the shared external `edge` network (created
+    # once with `docker network create edge`; the staging/feature compose
+    # stacks attach their dashboard services to it). Declaring it here keeps
+    # the attachment across future caddy recreations — the initial hookup on
+    # the live container was done with `docker network connect edge ...` to
+    # avoid restarting prod.
+    networks:
+      - default
+      - edge
     ports:
       - "80:80"
       - "443:443"
@@ -190,3 +200,10 @@ volumes:
   roster_data:
   caddy_data:
   caddy_config:
+
+networks:
+  # Shared edge network: prod caddy <-> staging/feature dashboards.
+  # Created out-of-band (`docker network create edge`) so no compose
+  # project owns or removes it.
+  edge:
+    external: true

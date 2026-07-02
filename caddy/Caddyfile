@@ -38,3 +38,47 @@ podhost.club {
     header Referrer-Policy        "strict-origin-when-cross-origin"
     header X-Frame-Options        "SAMEORIGIN"
 }
+
+# ---------------------------------------------------------------------------
+# Non-production environments. Each proxies to its own compose stack's
+# dashboard over the external `edge` docker network (unique service names —
+# see docker-compose.staging.yml header for why they aren't `missioncontrol`).
+# Certs are auto-issued once the staging./feature. DNS records exist; until
+# then Caddy retries ACME in the background without affecting podhost.club.
+# ---------------------------------------------------------------------------
+
+staging.podhost.club {
+    encode zstd gzip
+
+    reverse_proxy missioncontrol-staging:5001 {
+        header_up X-Real-IP        {remote_host}
+        header_up X-Forwarded-For  {remote_host}
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-Host {host}
+    }
+
+    header Strict-Transport-Security "max-age=15552000"
+    header X-Content-Type-Options "nosniff"
+    header Referrer-Policy        "strict-origin-when-cross-origin"
+    header X-Frame-Options        "SAMEORIGIN"
+    # Keep non-prod out of search results.
+    header X-Robots-Tag           "noindex, nofollow"
+}
+
+feature.podhost.club {
+    encode zstd gzip
+
+    reverse_proxy missioncontrol-feature:5001 {
+        header_up X-Real-IP        {remote_host}
+        header_up X-Forwarded-For  {remote_host}
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-Host {host}
+    }
+
+    header Strict-Transport-Security "max-age=15552000"
+    header X-Content-Type-Options "nosniff"
+    header Referrer-Policy        "strict-origin-when-cross-origin"
+    header X-Frame-Options        "SAMEORIGIN"
+    # Keep non-prod out of search results.
+    header X-Robots-Tag           "noindex, nofollow"
+}

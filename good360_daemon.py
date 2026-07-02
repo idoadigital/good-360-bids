@@ -13,6 +13,7 @@ import pytz
 from playwright.sync_api import sync_playwright
 
 import config as _cfg
+import feature_flags
 import sandbox  # sandbox-mode URL routing
 from purchase_lock import exclusive_purchase_lock
 
@@ -1577,7 +1578,25 @@ class Handler(BaseHTTPRequestHandler):
                 # least a detectable signal.
                 pass
 
+    # Endpoints that can place a real order, or that log into the live site
+    # and fill card data. All refused when ENABLE_AUTO_BUY=false (staging /
+    # feature environments). Read-only paths (/health, /live/screenshot,
+    # /live/navigate) stay available.
+    _PURCHASE_PATHS = frozenset({
+        '/checkout',
+        '/test_checkout',
+        '/live/prepare_checkout',
+        '/live/place_order',
+        '/live/fetch_price',
+    })
+
     def _dispatch_post(self):
+        if self.path in self._PURCHASE_PATHS and not feature_flags.auto_buy_enabled():
+            return self._json(403, {
+                'status': 'BLOCKED',
+                'message': ('auto-buy disabled in this environment '
+                            '(ENABLE_AUTO_BUY=false)'),
+            })
         raw = self.rfile.read(int(self.headers.get('Content-Length', 0)) or 0) or b'{}'
         try:
             body = json.loads(raw)

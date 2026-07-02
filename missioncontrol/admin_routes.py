@@ -4399,10 +4399,13 @@ def _run_readiness_check_in_background(test_id: int, org_id: int,
     """Worker: imports autobuy_v2, runs attempt_purchase with the fake card
     override, writes the result onto the test_runs row."""
     import sys as _sys, traceback as _tb
-    # Repo root is already mounted at /root/good-360-bids in this container
-    # (see docker-compose missioncontrol volumes). Add to sys.path so we
-    # pick up the latest edits to autobuy_v2 without needing a rebuild.
-    for _p in ("/root/good-360-bids", "/root/good-360-bids/good360_roster"):
+    # Repo root is mounted at its HOST path in this container (see
+    # docker-compose missioncontrol volumes) — which differs per environment
+    # (prod / staging / feature checkouts). DASHBOARD_PROJECT_DIR points at
+    # it. Add to sys.path so we pick up the latest edits to autobuy_v2
+    # without needing a rebuild.
+    _proj = os.environ.get("DASHBOARD_PROJECT_DIR", "/root/good-360-bids")
+    for _p in (_proj, f"{_proj}/good360_roster"):
         if _p not in _sys.path:
             _sys.path.insert(0, _p)
 
@@ -4511,7 +4514,8 @@ def autobuy_readiness_check():
     # Resolve org_name for the test_runs row (so the UI can show it
     # without joining roster.db on every poll).
     import sys as _sys
-    for _p in ("/root/good-360-bids", "/root/good-360-bids/good360_roster"):
+    _proj = os.environ.get("DASHBOARD_PROJECT_DIR", "/root/good-360-bids")
+    for _p in (_proj, f"{_proj}/good360_roster"):
         if _p not in _sys.path:
             _sys.path.insert(0, _p)
     try:

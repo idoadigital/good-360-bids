@@ -22,8 +22,11 @@ import time
 
 sys.path.insert(0, "/app")
 sys.path.insert(0, "/app/good360_roster")
-sys.path.insert(0, "/root/good-360-bids")
-sys.path.insert(0, "/root/good-360-bids/good360_roster")
+# Resolve the checkout dir from this script's own location so the harness
+# works from any environment checkout (prod / staging / feature).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.join(_HERE, "good360_roster"))
 
 from good360_autobuy_v2 import attempt_purchase  # noqa: E402
 from roster_orchestrator import get_db_connection, log_truck_event  # noqa: E402
