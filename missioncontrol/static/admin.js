@@ -5223,7 +5223,7 @@ function _alertRender() {
                 <span class="alert-card-name">${escape(it.name)}</span>
                 <span class="alert-card-meta">${escape(formatHumanTime(new Date(it.firstSeen).toISOString()))}</span>
             </div>
-            <div class="alert-card-status">${escape(it.lastStatus || 'available — autobuy in flight…')}</div>
+            <div class="alert-card-status">${escape(it.lastStatus || 'available — no purchase status yet')}</div>
             <div class="alert-card-actions">
                 <a class="alert-card-buy" href="${escape(truckUrl)}" target="_blank" rel="noopener">Go Buy →</a>
                 <button class="alert-card-dismiss" type="button" data-alert-dismiss="${escape(it.name)}">dismiss</button>
@@ -5246,8 +5246,10 @@ function _alertOnScans(scans) {
             const name = t.name;
             const existing = ALERT_SEEN.get(name);
             // Status hint from the scan's `action` field (set by monitor when
-            // autobuy runs). Falls back to a friendly message if blank.
-            const statusText = s.action || (existing && existing.lastStatus) || 'available — autobuy in flight…';
+            // autobuy runs). When blank, do NOT claim an autobuy is running —
+            // during the 2026-07-08 incident this default read "autobuy in
+            // flight…" while the engine was down and nothing was dispatched.
+            const statusText = s.action || (existing && existing.lastStatus) || 'available — no purchase status yet';
             if (!existing) {
                 ALERT_SEEN.set(name, {
                     firstSeen:  now,
@@ -5262,6 +5264,19 @@ function _alertOnScans(scans) {
                     existing.lastStatus = statusText;
                 }
                 if (t.url && !existing.url) existing.url = t.url;
+            }
+        }
+    }
+
+    // If the newest scan shows a carded truck as no longer available, say so
+    // on the card instead of leaving the last "available…" status frozen.
+    const newest = scans[0];
+    if (newest && Array.isArray(newest.trucks)) {
+        for (const t of newest.trucks) {
+            const existing = ALERT_SEEN.get(t.name);
+            if (existing && !t.available &&
+                !(existing.lastStatus || '').includes('success')) {
+                existing.lastStatus = 'no longer available on Good360';
             }
         }
     }
