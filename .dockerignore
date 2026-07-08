@@ -1,0 +1,10 @@
+# Never bake secrets or repo history into image layers. Runtime config comes
+# from compose env_file (and missioncontrol's explicit ./.env bind mount) —
+# config.py's load_dotenv() is a no-op when /app/.env doesn't exist and never
+# overrides real container env vars.
+.env
+.env.*
+!.env.example
+.git
+__pycache__
+*.pyc

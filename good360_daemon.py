@@ -4,10 +4,12 @@
 import json
 import logging
 import os
+import queue
+import socket
 import threading
 import time
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytz
 from playwright.sync_api import sync_playwright
@@ -168,6 +170,17 @@ def _capture_finalize(page, outcome: str, message: str) -> str | None:
 # via sandbox.good360_browse_url() so a sandbox toggle takes effect on the
 # next page load without a daemon restart.
 DAEMON_PORT = 5002
+
+# Per-endpoint deadlines for browser-worker jobs (seconds). If the worker
+# doesn't finish inside the deadline the HTTP thread returns 503 instead of
+# hanging — the port stays responsive no matter what Playwright is doing.
+CHECKOUT_WORKER_TIMEOUT = int(os.environ.get("DAEMON_CHECKOUT_WORKER_TIMEOUT", "600"))
+LIVE_WORKER_TIMEOUT = int(os.environ.get("DAEMON_LIVE_WORKER_TIMEOUT", "420"))
+NAV_WORKER_TIMEOUT = int(os.environ.get("DAEMON_NAV_WORKER_TIMEOUT", "120"))
+SCREENSHOT_WORKER_TIMEOUT = int(os.environ.get("DAEMON_SCREENSHOT_WORKER_TIMEOUT", "30"))
+# A browser job older than this is considered wedged; the self-watchdog
+# exits the process so docker's restart:always brings up a fresh browser.
+JOB_HARD_CAP_SECONDS = int(os.environ.get("DAEMON_JOB_HARD_CAP_SECONDS", "900"))
 
 logging.basicConfig(level=logging.INFO,
     format='%(asctime)s [DAEMON] %(message)s',
@@ -1599,6 +1612,101 @@ class BrowserManager:
 
 manager = BrowserManager()
 
+
+class BrowserWorker:
+    """Single thread that OWNS the sync-Playwright session end-to-end.
+
+    Why: sync Playwright objects are bound to the thread that created them,
+    so the HTTP layer can't touch the browser directly once the server is
+    threaded. All browser work is funneled through this one thread; HTTP
+    handler threads submit jobs and wait with a deadline.
+
+    This is the fix for the June 16 2026 incident: the old single-threaded
+    HTTPServer wedged inside one Playwright call, the 5-deep listen backlog
+    filled, and every checkout for the next two weeks died with
+    ConnectTimeout while the container sat 'healthy' (its healthcheck read
+    the monitor's heartbeat, not this port). Now a stuck browser call can
+    slow checkouts but can never seal the port — and the self-watchdog
+    below restarts the process if a job wedges past JOB_HARD_CAP_SECONDS.
+    """
+
+    def __init__(self, mgr):
+        self.manager = mgr
+        self.jobs = queue.Queue()
+        self.busy_since = None      # epoch of current job start (watchdog reads)
+        self.current_job = None
+        self.ready = threading.Event()
+        self.thread = threading.Thread(target=self._loop, name="browser-worker", daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def _loop(self):
+        try:
+            self.manager.start()
+            self.ready.set()
+        except Exception:
+            log.exception("Browser startup failed — exiting for docker restart")
+            os._exit(1)
+        while True:
+            fn, args, kwargs, box, done = self.jobs.get()
+            self.busy_since = time.time()
+            self.current_job = getattr(fn, "__name__", str(fn))
+            try:
+                box["result"] = fn(*args, **kwargs)
+            except BaseException as exc:  # noqa: BLE001 — report, never kill the loop
+                box["error"] = exc
+            finally:
+                self.busy_since = None
+                self.current_job = None
+                done.set()
+
+    def call(self, fn, *args, timeout=60, **kwargs):
+        """Run fn on the browser thread; raise TimeoutError past the deadline.
+        A timed-out job keeps running on the worker (there is no safe way to
+        kill a sync-Playwright call) — the hard-cap watchdog deals with true
+        wedges."""
+        box, done = {}, threading.Event()
+        self.jobs.put((fn, args, kwargs, box, done))
+        if not done.wait(timeout):
+            raise TimeoutError(
+                f"browser worker did not finish {getattr(fn, '__name__', fn)} "
+                f"within {timeout}s (current job: {self.current_job})")
+        if "error" in box:
+            raise box["error"]
+        return box["result"]
+
+
+worker = BrowserWorker(manager)
+
+
+def start_self_watchdog():
+    """Belt-and-suspenders: exit the process (docker restart:always revives
+    it with a fresh browser) if the port stops accepting or a browser job
+    exceeds the hard cap. Runs as a daemon thread."""
+    def loop():
+        misses = 0
+        while True:
+            time.sleep(60)
+            try:
+                s = socket.create_connection(("127.0.0.1", DAEMON_PORT), timeout=5)
+                s.close()
+                misses = 0
+            except Exception as exc:  # noqa: BLE001
+                misses += 1
+                log.error(f"self-probe: port {DAEMON_PORT} not accepting ({misses}/3): {exc}")
+                if misses >= 3:
+                    log.critical("Port sealed — exiting so docker restarts us")
+                    os._exit(1)
+            started = worker.busy_since
+            if started and (time.time() - started) > JOB_HARD_CAP_SECONDS:
+                log.critical(
+                    f"Browser job {worker.current_job!r} stuck for "
+                    f"{int(time.time() - started)}s (> {JOB_HARD_CAP_SECONDS}s hard cap) "
+                    "— exiting so docker restarts us with a fresh browser")
+                os._exit(1)
+    threading.Thread(target=loop, name="self-watchdog", daemon=True).start()
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args): log.info(f"HTTP: {args[0]}")
 
@@ -1615,7 +1723,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {'status':'ok','contexts':list(manager.contexts.keys())})
         if self.path.startswith('/live/screenshot'):
             try:
-                png = manager.live_screenshot()
+                png = worker.call(manager.live_screenshot, timeout=SCREENSHOT_WORKER_TIMEOUT)
             except Exception as e:
                 return self._json(500, {'status':'error','message':str(e)})
             self.send_response(200)
@@ -1635,6 +1743,19 @@ class Handler(BaseHTTPRequestHandler):
         # can parse, even on failure.
         try:
             return self._dispatch_post()
+        except TimeoutError as _busy_err:
+            # Browser worker missed its deadline — the port is fine, the
+            # browser is busy or stuck. 503 tells callers to treat this as
+            # infrastructure, not a card/checkout verdict.
+            log.error(f"do_POST({self.path}) worker timeout: {_busy_err}")
+            try:
+                self._json(503, {
+                    'status': 'error',
+                    'message': f'browser worker timeout: {_busy_err}',
+                })
+            except Exception:
+                pass
+            return
         except Exception as _post_err:
             log.exception(f"do_POST({self.path}) unhandled: {_post_err}")
             try:
@@ -1682,7 +1803,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(404, {'status':'error','message':f'org {org_key!r} not configured'})
             except Exception:
                 return self._json(500, {'status':'error','message':'orgs load failed'})
-            status, msg, elapsed = manager.checkout(org_key, org_config, truck_name, truck_url)
+            status, msg, elapsed = worker.call(manager.checkout, org_key, org_config,
+                                               truck_name, truck_url,
+                                               timeout=CHECKOUT_WORKER_TIMEOUT)
             return self._json(200, {
                 'status':       status,
                 'message':      msg,
@@ -1737,7 +1860,9 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception as e:
                         log.warning(f"[{org_key}] force_login: context close failed: {e}")
                 log.info(f"[{org_key}] force_login: fresh context will be built; will re-authenticate")
-            status, msg, elapsed = manager.checkout(org_key, org_config, truck_name, truck_url, force_login=force_login)
+            status, msg, elapsed = worker.call(manager.checkout, org_key, org_config,
+                                               truck_name, truck_url, force_login=force_login,
+                                               timeout=CHECKOUT_WORKER_TIMEOUT)
             return self._json(200, {
                 'status':       status,
                 'message':      msg,
@@ -1751,7 +1876,7 @@ class Handler(BaseHTTPRequestHandler):
             if not url:
                 return self._json(400, {'status':'error','message':'url required'})
             try:
-                manager.live_navigate(url)
+                worker.call(manager.live_navigate, url, timeout=NAV_WORKER_TIMEOUT)
                 return self._json(200, {'status':'ok','url':url})
             except Exception as e:
                 return self._json(500, {'status':'error','message':str(e)})
@@ -1761,11 +1886,12 @@ class Handler(BaseHTTPRequestHandler):
             truck_url = body.get('truck_url')
             if not org_key or not truck_url:
                 return self._json(400, {'status':'error','message':'org_key + truck_url required'})
-            status, msg = manager.live_prepare_checkout(org_key, truck_url)
+            status, msg = worker.call(manager.live_prepare_checkout, org_key, truck_url,
+                                      timeout=LIVE_WORKER_TIMEOUT)
             return self._json(200, {'status':status, 'message':msg})
 
         if self.path == '/live/place_order':
-            status, msg = manager.live_place_order()
+            status, msg = worker.call(manager.live_place_order, timeout=LIVE_WORKER_TIMEOUT)
             return self._json(200, {'status':status, 'message':msg})
 
         if self.path == '/live/fetch_price':
@@ -1773,22 +1899,34 @@ class Handler(BaseHTTPRequestHandler):
             truck_url = body.get('truck_url')
             if not org_key or not truck_url:
                 return self._json(400, {'status':'error','message':'org_key + truck_url required'})
-            price, status, msg = manager.live_fetch_price(org_key, truck_url)
+            price, status, msg = worker.call(manager.live_fetch_price, org_key, truck_url,
+                                             timeout=LIVE_WORKER_TIMEOUT)
             return self._json(200, {'status':status, 'message':msg, 'price':price})
 
         if self.path == '/shutdown':
-            manager.shutdown()
+            worker.call(manager.shutdown, timeout=30)
             return self._json(200, {'status':'shutting_down'})
 
         self.send_response(404); self.end_headers()
 
 def main():
     log.info("Good360 Persistent Browser Daemon v2 starting...")
-    manager.start()
-    server = HTTPServer(('0.0.0.0', DAEMON_PORT), Handler)
-    log.info(f"API on port {DAEMON_PORT} - Ready!")
+    # Browser boots on ITS OWN thread (sync Playwright is thread-bound);
+    # the HTTP server is threaded so /health and friends always answer,
+    # even mid-checkout or with a wedged browser call.
+    worker.start()
+    if not worker.ready.wait(90):
+        log.critical("Browser did not start within 90s — exiting for docker restart")
+        os._exit(1)
+    server = ThreadingHTTPServer(('0.0.0.0', DAEMON_PORT), Handler)
+    server.daemon_threads = True
+    start_self_watchdog()
+    log.info(f"API on port {DAEMON_PORT} - Ready! (threaded; browser jobs serialized)")
     try: server.serve_forever()
     except KeyboardInterrupt: pass
-    finally: manager.shutdown(); server.server_close()
+    finally:
+        try: worker.call(manager.shutdown, timeout=30)
+        except Exception: pass
+        server.server_close()
 
 if __name__ == '__main__': main()
