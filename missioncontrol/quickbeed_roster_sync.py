@@ -94,6 +94,22 @@ def ensure_roster_initialized() -> None:
             c.commit()
             logger.info("Added order lifecycle columns to purchase_attempts")
 
+    # Migration: Phase 5 operator abort — purchase_attempts.abort_requested
+    # + widened status CHECK ('aborted_operator'). Lives in the roster
+    # module's schema.py (needs a table rebuild) so tests can run it on
+    # temp DBs. Best-effort: a migration failure degrades the abort feature
+    # only — it must never break the sync/purchase path.
+    try:
+        import sys
+        roster_module_path = str(Path(__file__).parent.parent / "good360_roster")
+        if roster_module_path not in sys.path:
+            sys.path.insert(0, roster_module_path)
+        import schema as roster_schema  # type: ignore[import-not-found]
+        roster_schema.migrate_purchase_attempts_abort(str(ROSTER_DB))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"abort/status migration failed (abort feature "
+                       f"unavailable until it succeeds): {exc}")
+
 
 # QuickBeed status → roster nonprofits.status mapping.
 # `active` is the only one we keep eligible. Everything else parks the row.

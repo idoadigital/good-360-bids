@@ -424,6 +424,28 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- Redirect-truck modal (Phase 5): opened from an aborted
+                     attempt whose truck event is still live. -->
+                <div class="modal" id="redirectModal" hidden>
+                    <div class="modal-card redirect-modal-card" role="dialog" aria-modal="true" aria-labelledby="redirectModalTitle">
+                        <h3 id="redirectModalTitle">Redirect truck</h3>
+                        <p class="redirect-modal-sub" id="redirectModalSub">—</p>
+                        <label class="redirect-choice">
+                            <input type="radio" name="redirectTarget" value="next" checked>
+                            <span>Next in queue (default)</span>
+                        </label>
+                        <label class="redirect-choice">
+                            <input type="radio" name="redirectTarget" value="org">
+                            <span>Specific org:</span>
+                        </label>
+                        <select id="redirectOrgSelect" class="redirect-org-select" disabled></select>
+                        <div class="modal-actions">
+                            <button type="button" data-close>Cancel</button>
+                            <button type="button" class="btn-primary" id="redirectModalGo">Redirect truck →</button>
+                        </div>
+                    </div>
+                </div>
             </section>
 
             <!-- ============ CUSTOMER DETAIL (sub-panel of customers) ============ -->

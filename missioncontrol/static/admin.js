@@ -937,6 +937,14 @@ async function loadPurchases() {
         const summary = _purchaseSummary(p);
         const delId = p.attempt_id != null ? p.attempt_id : (p.id != null ? p.id : '');
 
+        // Phase 5 — operator abort / redirect. Roster rows only.
+        const isRosterRow = (p.source || 'roster') === 'roster';
+        const canAbort = isSuper && isRosterRow && p.status === 'in_progress' && delId !== '';
+        const abortPending = isRosterRow && p.status === 'in_progress' && Number(p.abort_requested);
+        const truckLive = ['detected', 'assigned'].includes(String(p.truck_event_status || '').toLowerCase());
+        const canRedirect = isSuper && isRosterRow && p.status === 'aborted_operator'
+            && truckLive && p.truck_event_id != null;
+
         const tr = document.createElement('tr');
         tr.className = 'purchase-row' + (expanded ? ' expanded' : '');
         tr.dataset.key = key;
@@ -948,9 +956,11 @@ async function loadPurchases() {
             <td data-label="Org">${escape(p.org_id || '—')}</td>
             <td data-label="Truck">${escape(p.truck || '—')}</td>
             <td class="num" data-label="Total">${p.total != null ? '$' + Number(p.total).toFixed(2) : '—'}</td>
-            <td data-label="Status"><span class="pill ${pillClass(status)}">${escape(status.toLowerCase())}</span></td>
+            <td data-label="Status"><span class="pill ${pillClass(status)}">${escape(status.toLowerCase())}</span>${abortPending ? ' <span class="pill warn" title="Abort flag set — takes effect only if a pre-Place-Order checkpoint is still ahead">abort requested</span>' : ''}</td>
             <td class="mono" data-label="Detail" style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escape(summary)}</td>
             <td class="super-only" data-hidden="${isSuper ? 'false' : 'true'}">
+                ${canAbort && !abortPending ? `<button type="button" class="row-abort-btn" title="Abort this purchase (only possible before Place Order)" data-abort-id="${escape(String(delId))}">⛔ Abort</button>` : ''}
+                ${canRedirect ? `<button type="button" class="row-redirect-btn" title="Redirect this truck to another org" data-redirect-event="${escape(String(p.truck_event_id))}">Redirect truck →</button>` : ''}
                 ${delId !== '' ? `<button type="button" class="row-delete-btn" title="Delete this attempt" data-del-source="${escape(p.source || 'roster')}" data-del-id="${escape(String(delId))}">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
                 </button>` : ''}
@@ -964,8 +974,8 @@ async function loadPurchases() {
         tb.appendChild(dt);
 
         tr.addEventListener('click', (e) => {
-            // Don't expand when the delete button (or anything inside it) is clicked.
-            if (e.target.closest('.row-delete-btn')) return;
+            // Don't expand when a row action button (or anything inside it) is clicked.
+            if (e.target.closest('.row-delete-btn, .row-abort-btn, .row-redirect-btn')) return;
             if (PURCHASE_EXPANDED.has(key)) PURCHASE_EXPANDED.delete(key);
             else                            PURCHASE_EXPANDED.add(key);
             tr.classList.toggle('expanded');
@@ -987,6 +997,27 @@ async function loadPurchases() {
                     _renderDiagnoseInline(dslot);
                 }
             }
+        });
+
+        const abortBtn = tr.querySelector('.row-abort-btn');
+        if (abortBtn) abortBtn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (!window.confirm('Abort this purchase? If the order was already placed it cannot be stopped — the abort takes effect only before Place Order.')) return;
+            abortBtn.disabled = true;
+            try {
+                const res = await api(`/api/admin/purchases/roster/${encodeURIComponent(abortBtn.dataset.abortId)}/abort`, {method: 'POST'}).then(r => r.json());
+                if (!res.success) throw new Error(res.error || 'abort failed');
+                loadPurchases();
+            } catch (err) {
+                abortBtn.disabled = false;
+                window.alert('Abort failed: ' + (err.message || err));
+            }
+        });
+
+        const redirBtn = tr.querySelector('.row-redirect-btn');
+        if (redirBtn) redirBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openRedirectModal(redirBtn.dataset.redirectEvent, p);
         });
 
         const delBtn = tr.querySelector('.row-delete-btn');
@@ -1049,7 +1080,80 @@ document.addEventListener('DOMContentLoaded', () => {
             loadPurchases().catch(e => console.error('[purchases]', e));
         });
     });
+    _wireRedirectModal();
 });
+
+// ---- Redirect-truck modal (Phase 5) ---------------------------------
+// Opens from an aborted attempt whose truck is still live. Default is
+// "next in queue" (roster picks); the dropdown offers only currently
+// eligible orgs (active + in rotation + not cooling), same source as the
+// roster queue panel. The server re-validates the target either way.
+function openRedirectModal(eventId, p) {
+    const modal = $('#redirectModal');
+    if (!modal) return;
+    modal.dataset.eventId = String(eventId);
+    const sub = $('#redirectModalSub');
+    if (sub) sub.textContent = `${p?.truck || p?.truck_title || 'Truck'} — pick who gets it.`;
+    const nextRadio = modal.querySelector('input[name="redirectTarget"][value="next"]');
+    if (nextRadio) nextRadio.checked = true;
+    const sel = $('#redirectOrgSelect');
+    sel.disabled = true;
+    sel.innerHTML = '<option value="">Loading…</option>';
+    modal.hidden = false;
+    api('/api/admin/roster/queue').then(r => r.json()).then(r => {
+        const rows = (r.data && r.data.queue) || [];
+        sel.innerHTML = rows.length
+            ? rows.map(c => `<option value="${escape(String(c.id))}">${escape(c.organization_name || c.full_name || String(c.id))}</option>`).join('')
+            : '<option value="">(no eligible orgs)</option>';
+        _syncRedirectSelectState();
+    }).catch(() => {
+        sel.innerHTML = '<option value="">(failed to load orgs)</option>';
+    });
+}
+
+function _syncRedirectSelectState() {
+    const modal = $('#redirectModal');
+    if (!modal) return;
+    const mode = modal.querySelector('input[name="redirectTarget"]:checked')?.value;
+    $('#redirectOrgSelect').disabled = mode !== 'org';
+}
+
+function _wireRedirectModal() {
+    const modal = $('#redirectModal');
+    if (!modal) return;
+    modal.querySelectorAll('input[name="redirectTarget"]').forEach(r =>
+        r.addEventListener('change', _syncRedirectSelectState));
+    modal.querySelector('[data-close]').addEventListener('click', () => { modal.hidden = true; });
+    modal.addEventListener('click', (ev) => { if (ev.target === modal) modal.hidden = true; });
+    const go = $('#redirectModalGo');
+    go.addEventListener('click', async () => {
+        const eventId = modal.dataset.eventId;
+        const mode = modal.querySelector('input[name="redirectTarget"]:checked')?.value;
+        const payload = mode === 'org'
+            ? { org_id: $('#redirectOrgSelect').value }
+            : { next_in_queue: true };
+        if (mode === 'org' && !payload.org_id) {
+            window.alert('Pick an org from the list (or use Next in queue).');
+            return;
+        }
+        go.disabled = true;
+        try {
+            const res = await api(`/api/admin/truck-events/${encodeURIComponent(eventId)}/redirect`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload),
+            }).then(r => r.json());
+            if (!res.success) throw new Error(res.error || 'redirect failed');
+            modal.hidden = true;
+            window.alert(`Redirect dispatched (${res.target}). The new attempt will appear in this list shortly.`);
+            loadPurchases().catch(e => console.error('[purchases]', e));
+        } catch (err) {
+            window.alert('Redirect failed: ' + (err.message || err));
+        } finally {
+            go.disabled = false;
+        }
+    });
+}
 
 async function _renderDiagnoseInline(slot, { refresh = false } = {}) {
     const source = slot.dataset.diagSource;
@@ -5250,6 +5354,7 @@ function dataReadinessBadge(c) {
 function pillClass(status) {
     if (!status) return 'idle';
     const s = String(status).toLowerCase();
+    if (s.includes('abort')) return 'abort';   // operator abort — distinct from failures
     if (s.includes('success') || s === 'ok' || s === 'purchased') return 'ok';
     if (s.includes('fail') || s.includes('error')) return 'err';
     if (s.includes('miss') || s.includes('partial') || s.includes('warn')) return 'warn';

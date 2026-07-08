@@ -133,7 +133,9 @@ def get_truck_event(event_id: int) -> sqlite3.Row:
 # attempt_purchase outcomes that mean "this org failed, the truck may still
 # be buyable — advance to the next org in the roster". Everything else is
 # terminal for the truck: success/dry_run_ok (bought), truck_gone (sold out),
-# alerted_manual (alert-only flow took it).
+# alerted_manual (alert-only flow took it), aborted_operator (operator took
+# control — never auto-advance past an operator's abort; the redirect
+# endpoint or the next monitor cycle decides what happens to the truck).
 RETRYABLE_STATUSES = {"failed_checkout", "failed_payment"}
 
 

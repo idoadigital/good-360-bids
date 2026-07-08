@@ -2123,7 +2123,25 @@ def _roster_purchase_rows(where_sql: str = "", params: tuple = (), limit: int = 
         where_parts.append("np.quickbeed_customer_id = ?")
         params = (*params, customer_id)
     where = " AND ".join(where_parts)
-    sql = f"""
+    try:
+        conn = _sqlite.connect(ROSTER_DB_PATH, timeout=5.0)
+        conn.row_factory = _sqlite.Row
+        # abort_requested arrives with the Phase-5 abort migration; a
+        # roster.db that predates it must not blank the whole purchases
+        # panel, so probe for the column and select a literal 0 instead.
+        # Same guard for truck_events.status (some test fixtures/partial
+        # mirrors carry a slimmer truck_events).
+        _abort_col = "pa.abort_requested"
+        pa_cols = {r["name"] for r in conn.execute(
+            "PRAGMA table_info(purchase_attempts)").fetchall()}
+        if "abort_requested" not in pa_cols:
+            _abort_col = "0"
+        _te_status_col = "te.status"
+        te_cols = {r["name"] for r in conn.execute(
+            "PRAGMA table_info(truck_events)").fetchall()}
+        if "status" not in te_cols:
+            _te_status_col = "NULL"
+        sql = f"""
         SELECT
             pa.id                  AS attempt_id,
             COALESCE(pa.completed_at, pa.started_at) AS ts,
@@ -2140,9 +2158,12 @@ def _roster_purchase_rows(where_sql: str = "", params: tuple = (), limit: int = 
             pa.order_status_source AS order_status_source,
             pa.order_status_updated_at AS order_status_updated_at,
             pa.cooldown_applied    AS cooldown_applied,
+            pa.truck_event_id      AS truck_event_id,
+            {_abort_col}           AS abort_requested,
             te.truck_title         AS truck_title,
             te.truck_url           AS truck_url,
             te.truck_price         AS truck_price,
+            {_te_status_col}       AS truck_event_status,
             np.org_name            AS org_name,
             np.contact_email       AS org_email,
             np.quickbeed_customer_id AS quickbeed_customer_id
@@ -2153,9 +2174,6 @@ def _roster_purchase_rows(where_sql: str = "", params: tuple = (), limit: int = 
         ORDER BY COALESCE(pa.completed_at, pa.started_at) DESC
         LIMIT ?
     """
-    try:
-        conn = _sqlite.connect(ROSTER_DB_PATH, timeout=5.0)
-        conn.row_factory = _sqlite.Row
         rows = conn.execute(sql, (*params, limit)).fetchall()
         conn.close()
     except _sqlite.Error as exc:
@@ -2359,6 +2377,225 @@ def admin_delete_purchase(source: str, attempt_id: int):
     auth.audit("purchase.delete", target=f"{source}:{attempt_id}",
                detail=f"deleted {deleted} row(s)")
     return jsonify({"success": True, "deleted": deleted})
+
+
+# ============================================================
+# Phase 5 — operator abort of an in-flight autobuy + redirect of a
+# still-live truck to another org.
+# ============================================================
+# Module-level SQL so tests can exercise the exact statements against temp
+# DBs (ROSTER_COOLDOWN_SQL precedent). The abort UPDATE only flips rows
+# that are still in_progress — a terminal row can never be "aborted".
+ABORT_FLAG_SQL = ("UPDATE purchase_attempts SET abort_requested = 1 "
+                  "WHERE id = ? AND status = 'in_progress'")
+REDIRECT_TRUCK_OK_STATUSES = ("detected", "assigned")
+REDIRECT_INFLIGHT_SQL = ("SELECT COUNT(*) FROM purchase_attempts "
+                         "WHERE truck_event_id = ? AND status = 'in_progress'")
+# next-in-queue redirect: handle_truck_event only accepts 'detected' trucks,
+# and an aborted attempt leaves the truck 'assigned' — reset it first.
+REDIRECT_TRUCK_RESET_SQL = (
+    "UPDATE truck_events SET status = 'detected', assigned_to_org_id = NULL, "
+    "assigned_at = NULL WHERE id = ? AND status IN ('detected','assigned')")
+
+
+@bp.route("/api/admin/purchases/roster/<int:attempt_id>/abort", methods=["POST"])
+@auth.super_admin_required
+def abort_roster_purchase(attempt_id: int):
+    """Flag an in-flight autobuy attempt for operator abort. The daemon
+    polls the flag at four fixed checkpoints and stops BEFORE clicking
+    Place Order; once the click happens an abort is impossible — a 200
+    here only means the flag landed, not that the abort will win the race.
+    404 when the attempt doesn't exist, 409 when it is not in_progress."""
+    import sqlite3 as _sqlite
+    if not os.path.exists(ROSTER_DB_PATH):
+        return jsonify({"success": False, "error": "roster.db unavailable"}), 503
+    try:
+        conn = _sqlite.connect(ROSTER_DB_PATH, timeout=10.0)
+        try:
+            row = conn.execute(
+                "SELECT status FROM purchase_attempts WHERE id = ?",
+                (attempt_id,)).fetchone()
+            if row is None:
+                return jsonify({"success": False, "error": "attempt not found"}), 404
+            if row[0] != "in_progress":
+                return jsonify({"success": False,
+                                "error": f"attempt is {row[0]!r}, not in_progress"}), 409
+            cur = conn.execute(ABORT_FLAG_SQL, (attempt_id,))
+            conn.commit()
+            flagged = cur.rowcount == 1
+        finally:
+            conn.close()
+    except _sqlite.Error as exc:
+        return jsonify({"success": False, "error": f"roster.db error: {exc}"}), 503
+    auth.audit("purchase.abort", target=f"roster:{attempt_id}",
+               detail=("abort_requested set" if flagged
+                       else "flag NOT set (attempt reached a terminal status first)"))
+    return jsonify({"success": True, "abort_requested": flagged})
+
+
+def _redirect_validate(rconn, dconn, event_id: int, org_ref):
+    """Validation predicates for POST /api/admin/truck-events/<id>/redirect,
+    factored out so tests can run them against temp DBs.
+
+    rconn: roster.db connection. dconn: dashboard db connection.
+    org_ref: roster nonprofits.id (int) or QuickBeed customer id (str);
+    None means next-in-queue (no org gate — the roster pick + autobuy_v2's
+    own approval gate handle eligibility).
+
+    Returns (http_status, error_or_None, roster_org_id_or_None). The org
+    gate mirrors autobuy_v2._live_purchase_approval_blocker: the dashboard
+    row must be status='active' AND in_rotation=1 (the same defense-in-depth
+    gate re-checks at purchase time regardless)."""
+    truck = rconn.execute(
+        "SELECT status FROM truck_events WHERE id = ?", (event_id,)).fetchone()
+    if truck is None:
+        return 404, "truck event not found", None
+    if truck[0] not in REDIRECT_TRUCK_OK_STATUSES:
+        return 409, (f"truck event is {truck[0]!r} — only "
+                     "detected/assigned trucks can be redirected"), None
+    inflight = rconn.execute(REDIRECT_INFLIGHT_SQL, (event_id,)).fetchone()[0]
+    if inflight:
+        return 409, ("an attempt for this truck is still in_progress — "
+                     "abort it and wait for it to finish first"), None
+    if org_ref is None:
+        return 200, None, None
+    # Resolve org_ref: roster id first when numeric, QuickBeed id otherwise.
+    row = None
+    if str(org_ref).isdigit():
+        row = rconn.execute(
+            "SELECT id, quickbeed_customer_id FROM nonprofits WHERE id = ?",
+            (int(org_ref),)).fetchone()
+    if row is None:
+        row = rconn.execute(
+            "SELECT id, quickbeed_customer_id FROM nonprofits "
+            "WHERE quickbeed_customer_id = ?", (str(org_ref),)).fetchone()
+    if row is None:
+        return 404, "target org not found in roster", None
+    if not row[1]:
+        return 409, ("target org has no QuickBeed customer id — live "
+                     "purchases are only allowed for synced customers"), None
+    cust = dconn.execute(
+        "SELECT status, in_rotation FROM customers WHERE id = ?",
+        (row[1],)).fetchone()
+    if cust is None:
+        return 409, ("target org not in the dashboard mirror — "
+                     "cannot verify approval"), None
+    if (cust[0] or "") != "active" or int(cust[1] or 0) != 1:
+        return 409, (f"target org blocked by approval gate "
+                     f"(status={cust[0]!r}, in_rotation={cust[1]!r}) — "
+                     "must be active AND in rotation"), None
+    return 200, None, int(row[0])
+
+
+def _run_redirect_in_background(event_id: int, roster_org_id, user_email) -> None:
+    """Worker for the redirect endpoint: dispatch the truck to the roster
+    (next-in-queue) or straight to one org, then record the outcome as an
+    admin_audit row (action='truck.redirect_result') — the purchases panel
+    shows the new attempt on its normal refresh.
+
+    Import strategy — deliberately different from
+    _run_readiness_check_in_background: that worker prefers
+    DASHBOARD_PROJECT_DIR (the host checkout), but in the missioncontrol
+    container that mount is READ-ONLY (compose: /root/...-feature:ro) and
+    roster_orchestrator opens good360_roster/orchestrator.log next to its
+    own file at import time, so importing the /root copy dies with a
+    read-only-filesystem OSError. The image's own /app/good360_roster copy
+    is writable (verified in the feature image) and its db/ directory is
+    the same roster_data volume every service mounts, so we prefer /app
+    when it is present AND writable, falling back to DASHBOARD_PROJECT_DIR
+    for monitor-style environments where the checkout itself is writable."""
+    import sys as _sys
+    import traceback as _tb
+    app_pkg = "/app/good360_roster"
+    if (os.path.isfile(os.path.join(app_pkg, "roster_orchestrator.py"))
+            and os.access(app_pkg, os.W_OK)):
+        paths = [app_pkg, "/app"]
+    else:
+        _proj = os.environ.get("DASHBOARD_PROJECT_DIR", "/root/good-360-bids")
+        paths = [f"{_proj}/good360_roster", _proj]
+    for _p in reversed(paths):
+        if _p in _sys.path:
+            _sys.path.remove(_p)
+        _sys.path.insert(0, _p)
+
+    if roster_org_id is None:
+        target = "next_in_queue"
+    else:
+        target = f"org:{roster_org_id}"
+    try:
+        if roster_org_id is None:
+            import roster_orchestrator as _ro  # type: ignore
+            result = _ro.handle_truck_event(event_id)
+        else:
+            from good360_autobuy_v2 import attempt_purchase  # type: ignore
+            result = attempt_purchase(roster_org_id, event_id)
+        status = getattr(result, "status", None)
+        if status is None and isinstance(result, dict):
+            status = result.get("status") or result.get("error")
+        outcome = f"status={status}"
+    except Exception as exc:  # noqa: BLE001
+        outcome = f"CRASH {type(exc).__name__}: {exc}"
+        print(f"[redirect] worker failed for truck {event_id}: "
+              f"{_tb.format_exc()}", flush=True)
+    try:
+        with get_conn() as c:
+            c.execute(
+                "INSERT INTO admin_audit(user_id, user_email, action, target, detail, ip) "
+                "VALUES (?,?,?,?,?,?)",
+                (None, user_email, "truck.redirect_result",
+                 f"truck_event:{event_id}", f"{target} · {outcome}"[:500], None))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@bp.route("/api/admin/truck-events/<int:event_id>/redirect", methods=["POST"])
+@auth.super_admin_required
+def redirect_truck_event(event_id: int):
+    """Operator redirect (typically after an abort): hand a still-live truck
+    to the next org in the queue or to one explicit org.
+    Body: {"next_in_queue": true} OR {"org_id": <roster id | QuickBeed id>}.
+    Validates the truck (must be detected/assigned, no in-flight attempt)
+    and the explicit target (approval-gate semantics: active + in rotation),
+    then dispatches in a background thread. The dispatch outcome lands in
+    admin_audit as action='truck.redirect_result'; the new purchase attempt
+    appears in the purchases panel on its normal refresh."""
+    import sqlite3 as _sqlite
+    body = request.get_json(silent=True) or {}
+    next_in_queue = bool(body.get("next_in_queue"))
+    org_ref = body.get("org_id")
+    if next_in_queue == (org_ref is not None):
+        return jsonify({"success": False,
+                        "error": "pass exactly one of next_in_queue:true or org_id"}), 400
+    if not os.path.exists(ROSTER_DB_PATH):
+        return jsonify({"success": False, "error": "roster.db unavailable"}), 503
+
+    try:
+        rconn = _sqlite.connect(ROSTER_DB_PATH, timeout=10.0)
+        try:
+            with get_conn() as dconn:
+                code, err, roster_org_id = _redirect_validate(
+                    rconn, dconn, event_id, None if next_in_queue else org_ref)
+            if err:
+                return jsonify({"success": False, "error": err}), code
+            if next_in_queue:
+                rconn.execute(REDIRECT_TRUCK_RESET_SQL, (event_id,))
+                rconn.commit()
+        finally:
+            rconn.close()
+    except _sqlite.Error as exc:
+        return jsonify({"success": False, "error": f"roster.db error: {exc}"}), 503
+
+    u = auth.current_user() or {}
+    target = "next_in_queue" if next_in_queue else f"org:{roster_org_id}"
+    auth.audit("truck.redirect", target=f"truck_event:{event_id}", detail=target)
+    t = threading.Thread(
+        target=_run_redirect_in_background,
+        args=(event_id, roster_org_id, u.get("email")),
+        name=f"truck_redirect_{event_id}",
+        daemon=True,
+    )
+    t.start()
+    return jsonify({"success": True, "dispatched": True, "target": target})
 
 
 def _load_purchase_row(source: str, attempt_id: int) -> dict | None:

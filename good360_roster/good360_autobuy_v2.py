@@ -639,7 +639,8 @@ def _run_checkout_via_devtools_mcp(org: OrgContext, truck: TruckContext,
 
 def _run_checkout_via_daemon(org: OrgContext, truck: TruckContext,
                              payment_card: dict,
-                             *, test_mode: bool = False) -> CheckoutResult:
+                             *, test_mode: bool = False,
+                             attempt_id: int | None = None) -> CheckoutResult:
     """Deterministic checkout via the daemon's Playwright executor
     (good360_daemon.py::_checkout_inner) — the path verified end-to-end with
     screenshots and an evidence-based success heuristic (URL change, order-#
@@ -712,6 +713,9 @@ def _run_checkout_via_daemon(org: OrgContext, truck: TruckContext,
             "truck_name": truck.truck_title,
             "truck_url": truck.truck_url,
             "force_login": True,
+            # Lets the daemon poll purchase_attempts.abort_requested at its
+            # pre-Place-Order checkpoints (operator abort, Phase 5).
+            "attempt_id": attempt_id,
         }, timeout=(5, 420))
         payload = resp.json()
     except (_requests.exceptions.ConnectionError, _requests.exceptions.Timeout) as exc:
@@ -770,13 +774,19 @@ def _run_checkout_via_daemon(org: OrgContext, truck: TruckContext,
     if d_status == "MANUAL":
         return CheckoutResult(success=False, status="alerted_manual", mode="auto_buy",
                               error_message=f"[DAEMON] needs review: {d_msg}{suffix}")
+    if d_status == "ABORTED":
+        # Operator hit Abort before Place Order was clicked. NOT a card
+        # verdict, NOT a truck outcome — the ladder must stop entirely.
+        return CheckoutResult(success=False, status="aborted_operator", mode="auto_buy",
+                              error_message=f"[DAEMON] {d_msg}{suffix}")
     return CheckoutResult(success=False, status="failed_checkout", mode="auto_buy",
                           error_message=f"[DAEMON] {d_status or 'error'}: {d_msg}{suffix}")
 
 
 def run_checkout_sequence(org: OrgContext, truck: TruckContext,
                           payment_card: dict,
-                          *, test_mode: bool = False) -> CheckoutResult:
+                          *, test_mode: bool = False,
+                          attempt_id: int | None = None) -> CheckoutResult:
     """
     Execute full checkout sequence using browser_agent (Playwright).
     1. Open Good360
@@ -824,7 +834,8 @@ def run_checkout_sequence(org: OrgContext, truck: TruckContext,
     # demoted to an explicit opt-in via AUTOBUY_ENGINE=devtools_agent.
     engine = (os.environ.get("AUTOBUY_ENGINE") or "daemon").strip().lower()
     if engine != "devtools_agent":
-        return _run_checkout_via_daemon(org, truck, payment_card, test_mode=test_mode)
+        return _run_checkout_via_daemon(org, truck, payment_card, test_mode=test_mode,
+                                        attempt_id=attempt_id)
 
     # LLM agent path (opt-in). If MCP is unavailable we surface that as a
     # failed_checkout with a clear error_message so the operator notices.
@@ -1091,6 +1102,28 @@ def _alert_blocked_purchase(org_name: str, truck_title: str, reason: str,
             telegram_router.ADMIN, msg,
             source="autobuy_approval_gate", level="error",
             title=f"Purchase blocked: {org_name}")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _alert_operator_abort(org_name: str, truck_title: str, detail: str) -> None:
+    """Telegram notice that an in-flight purchase was aborted by the
+    operator. ADMIN-only on purpose: an abort is an operator action, never
+    customer-attributable — it must not reach an NGO channel. Best-effort;
+    the router never raises."""
+    import html as _html
+    msg = ("⛔ <b>PURCHASE ABORTED BY OPERATOR</b>\n"
+           f"Org: <b>{_html.escape(str(org_name))}</b>\n"
+           f"Truck: {_html.escape(str(truck_title))}\n"
+           f"Detail: {_html.escape(str(detail))}\n"
+           "No order was placed. The truck event stays assigned — use "
+           "Redirect truck in the dashboard to hand it to another org.")
+    try:
+        import telegram_router  # repo root is on sys.path (see module top)
+        telegram_router.send(
+            telegram_router.ADMIN, msg,
+            source="autobuy_abort", level="warning",
+            title=f"Purchase aborted: {org_name}")
     except Exception:  # noqa: BLE001
         pass
 
@@ -1406,7 +1439,8 @@ def attempt_purchase(org_id: int, truck_event_id: int,
     for card in payment_methods:
         logger.info(f"Attempting checkout with card #{card['priority']} for org {org_id}")
 
-        result = run_checkout_sequence(org, truck, card, test_mode=test_mode)
+        result = run_checkout_sequence(org, truck, card, test_mode=test_mode,
+                                       attempt_id=attempt_id)
         result.mode = "auto_buy"
         result.payment_method_id = card["id"]
         last_result = result
@@ -1455,6 +1489,28 @@ def attempt_purchase(org_id: int, truck_event_id: int,
             return result
 
         else:
+            if result.status == "aborted_operator":
+                # OPERATOR ABORT (Phase 5): the daemon stopped at a
+                # pre-Place-Order checkpoint because the operator flagged
+                # abort_requested. No order was placed and no card verdict
+                # was rendered, so: stop the ladder (no more cards), record
+                # NO card decline, do NOT suspend the org, do NOT alert a
+                # payment failure, and do NOT mark the truck missed — it
+                # stays 'assigned' so the operator's redirect (or the next
+                # monitor cycle) decides its fate.
+                update_purchase_attempt(
+                    attempt_id,
+                    status="aborted_operator",
+                    error_message=result.error_message,
+                    screenshot_path=result.screenshot_path,
+                )
+                logger.warning(f"PURCHASE ABORTED BY OPERATOR — org {org_id}, "
+                               f"truck {truck_event_id}: {result.error_message}")
+                if not test_mode:
+                    _alert_operator_abort(org.org_name, truck.truck_title,
+                                          result.error_message or "")
+                return result
+
             if result.status == "daemon_unreachable":
                 # INFRASTRUCTURE failure, not a card verdict: the daemon is
                 # down/sealed/stuck. Do NOT record a decline against the

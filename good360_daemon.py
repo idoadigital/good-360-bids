@@ -6,6 +6,7 @@ import logging
 import os
 import queue
 import socket
+import sqlite3
 import threading
 import time
 from datetime import datetime
@@ -40,6 +41,9 @@ import sandbox  # sandbox-mode URL routing
 from purchase_lock import exclusive_purchase_lock
 
 WORKDIR = os.environ.get("WORKDIR", "/a0/usr/workdir")
+# roster.db is mounted into this container (compose: roster_data volume at
+# /app/good360_roster/db) — read-only use here: the operator-abort flag.
+ROSTER_DB_PATH = os.environ.get("ROSTER_DB_PATH", "/app/good360_roster/db/roster.db")
 SCREENSHOT_DIR = f"{WORKDIR}/browser_screenshots"
 CAPTURE_DIR = f"{WORKDIR}/checkout_captures"
 LOG_FILE = f"{WORKDIR}/good360_daemon.log"
@@ -186,6 +190,31 @@ logging.basicConfig(level=logging.INFO,
     format='%(asctime)s [DAEMON] %(message)s',
     handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()])
 log = logging.getLogger('daemon')
+
+def _abort_requested(attempt_id) -> bool:
+    """True when the operator has flagged purchase_attempts.abort_requested
+    for this attempt (POST /api/admin/purchases/roster/<id>/abort).
+
+    FAIL-OPEN by design: any problem here (no attempt_id, roster.db missing
+    or locked, column not migrated yet, bad id) returns False so the
+    checkout continues — a broken abort system must never break purchasing.
+    """
+    if not attempt_id:
+        return False
+    try:
+        conn = sqlite3.connect(ROSTER_DB_PATH, timeout=2.0)
+        try:
+            row = conn.execute(
+                "SELECT abort_requested FROM purchase_attempts WHERE id = ?",
+                (int(attempt_id),)).fetchone()
+        finally:
+            conn.close()
+        return bool(row and row[0])
+    except Exception as e:  # noqa: BLE001 — fail-open by design
+        log.warning(f"abort-check failed for attempt {attempt_id} "
+                    f"(continuing purchase): {e}")
+        return False
+
 
 def now_et():
     return datetime.now(pytz.timezone('America/New_York'))
@@ -665,7 +694,8 @@ class BrowserManager:
             log.error(f"[{ctx['org_key']}] Login error: {e}")
             return False
 
-    def checkout(self, org_key, org_config, truck_name, truck_url, force_login=False):
+    def checkout(self, org_key, org_config, truck_name, truck_url, force_login=False,
+                 attempt_id=None):
         start_time = time.time()
         log.info(f"[{org_key}] === CHECKOUT: {truck_name} ===")
         # Cross-process lock: serialise against the monitor/script path so
@@ -675,9 +705,11 @@ class BrowserManager:
             if not ok:
                 log.info(f"[{org_key}] ⏭️  skipping {truck_name}: {reason}")
                 return 'SKIPPED', f"locked or recently attempted: {reason}", time.time() - start_time
-            return self._checkout_inner(org_key, org_config, truck_name, truck_url, start_time, force_login=force_login)
+            return self._checkout_inner(org_key, org_config, truck_name, truck_url, start_time,
+                                        force_login=force_login, attempt_id=attempt_id)
 
-    def _checkout_inner(self, org_key, org_config, truck_name, truck_url, start_time, force_login=False):
+    def _checkout_inner(self, org_key, org_config, truck_name, truck_url, start_time,
+                        force_login=False, attempt_id=None):
         # Activate per-checkout capture so the listeners on the persistent
         # page write into a fresh buffer. Always finalize in the finally so
         # success and failure both leave a JSON artifact on disk.
@@ -688,6 +720,27 @@ class BrowserManager:
         try:
             ctx = self.get_or_create_context(org_key)
             page = ctx['page']
+
+            def _abort_checkpoint(name):
+                """Operator-abort gate. Consulted at exactly four fixed
+                checkpoints; the LAST one runs immediately before
+                place_btn.click(). After that click the order is committed
+                and an abort is impossible — the flag is never checked or
+                acted on again. Returns None (continue) or (status, msg)."""
+                if not _abort_requested(attempt_id):
+                    return None
+                try:
+                    os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+                    page.screenshot(
+                        path=f"{SCREENSHOT_DIR}/{int(time.time())}_{org_key}_abort_{name}.png",
+                        full_page=True)
+                except Exception:
+                    pass
+                _capture_step(f"aborted_{name}")
+                log.warning(f"[{org_key}] ABORTED by operator at checkpoint {name} "
+                            f"(attempt {attempt_id})")
+                return 'ABORTED', f'aborted by operator at checkpoint {name}'
+
             # Login. `force_login` skips the liveness probe and drives
             # the sign-in form unconditionally — used by the per-customer
             # Test Buy where the caller has already wiped cookies and
@@ -695,6 +748,11 @@ class BrowserManager:
             _capture_step("login")
             if not self.ensure_logged_in(ctx, org_config, force=force_login):
                 status, msg = 'FAILED', 'Login failed'
+                return status, msg, time.time() - start_time
+            # Abort checkpoint (a): after login, before touching the truck.
+            aborted = _abort_checkpoint("after_login")
+            if aborted:
+                status, msg = aborted
                 return status, msg, time.time() - start_time
             # Navigate to product
             _capture_step("navigate", {"truck_url": truck_url})
@@ -758,6 +816,12 @@ class BrowserManager:
                 status, msg = 'FAILED', 'Add to Cart not found'
                 return status, msg, time.time() - start_time
             add_btn.click()
+            # Abort checkpoint (b): after navigate + add-to-cart. Items in a
+            # cart cost nothing — safe to walk away here.
+            aborted = _abort_checkpoint("after_add_to_cart")
+            if aborted:
+                status, msg = aborted
+                return status, msg, time.time() - start_time
 
             # Truck Quote Request modal handling. Trucks DON'T go through
             # the normal cart/checkout flow — Good360 pops a react-confirm
@@ -1285,6 +1349,12 @@ class BrowserManager:
             os.makedirs(SCREENSHOT_DIR, exist_ok=True)
             shot_prefix = f"{SCREENSHOT_DIR}/{int(time.time())}_{org_key}"
             _capture_step("place_order")
+            # Abort checkpoint (c): wizard filled, BEFORE waiting for Place
+            # Order to enable. Nothing has been committed yet.
+            aborted = _abort_checkpoint("before_place_order_wait")
+            if aborted:
+                status, msg = aborted
+                return status, msg, time.time() - start_time
             # Wait for the button to be visible AND enabled. The wizard
             # toggles `disabled` once the payment radio is selected and
             # the billing address is locked in — a plain `:visible` wait
@@ -1317,6 +1387,13 @@ class BrowserManager:
             ).first
             if not place_btn.is_visible(timeout=3000):
                 status, msg = 'FAILED', 'Place Order button not found after wizard'
+                return status, msg, time.time() - start_time
+            # Abort checkpoint (d): LAST possible moment — immediately before
+            # the Place Order click. Past this line the charge is committed;
+            # no abort check or abort action may ever run after the click.
+            aborted = _abort_checkpoint("before_place_order_click")
+            if aborted:
+                status, msg = aborted
                 return status, msg, time.time() - start_time
             try:
                 place_btn.click(timeout=15000)
@@ -1829,6 +1906,9 @@ class Handler(BaseHTTPRequestHandler):
             truck_name = body.get('truck_name')
             truck_url  = body.get('truck_url')
             force_login = bool(body.get('force_login', True))
+            # Roster purchase_attempts.id — enables the operator-abort
+            # checkpoints. Optional: callers without one get no abort gate.
+            attempt_id = body.get('attempt_id')
             if not (truck_name and truck_url):
                 return self._json(400, {'status':'error','message':'truck_name + truck_url required'})
             if not org_config.get('good360_email') or not org_config.get('good360_password'):
@@ -1862,6 +1942,7 @@ class Handler(BaseHTTPRequestHandler):
                 log.info(f"[{org_key}] force_login: fresh context will be built; will re-authenticate")
             status, msg, elapsed = worker.call(manager.checkout, org_key, org_config,
                                                truck_name, truck_url, force_login=force_login,
+                                               attempt_id=attempt_id,
                                                timeout=CHECKOUT_WORKER_TIMEOUT)
             return self._json(200, {
                 'status':       status,

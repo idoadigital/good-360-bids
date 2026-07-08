@@ -176,7 +176,7 @@ CREATE TABLE IF NOT EXISTS purchase_attempts (
                         CHECK(status IN (
                             'in_progress','success','success_mastercard',
                             'failed_payment','failed_login','failed_checkout',
-                            'truck_gone','alerted_manual','skipped_excluded','retrying'
+                            'truck_gone','alerted_manual','skipped_excluded','retrying','aborted_operator'
                         )),
     mode                TEXT    NOT NULL DEFAULT 'auto_buy'
                         CHECK(mode IN ('auto_buy','alert_only','master_card_fallback')),
@@ -185,7 +185,8 @@ CREATE TABLE IF NOT EXISTS purchase_attempts (
     screenshot_path     TEXT    NULL,
     confirmation_number TEXT    NULL,
     order_total         REAL    NULL,
-    cooldown_applied    INTEGER NOT NULL DEFAULT 0
+    cooldown_applied    INTEGER NOT NULL DEFAULT 0,
+    abort_requested     INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_pa_truck         ON purchase_attempts(truck_event_id);
@@ -341,6 +342,73 @@ def create_db(db_path: str, schema_sql: str = SCHEMA_SQL):
     conn.commit()
     conn.close()
     print(f"[SCHEMA] Database created: {db_path}")
+
+
+def migrate_purchase_attempts_abort(db_path: str) -> None:
+    """Phase 5 (operator abort) migration — idempotent, safe to re-run.
+
+    1. purchase_attempts.abort_requested INTEGER NOT NULL DEFAULT 0 — the
+       flag the daemon polls at its checkout checkpoints.
+    2. Widen the status CHECK to accept 'aborted_operator'. SQLite cannot
+       ALTER a CHECK constraint, so this rebuilds the table via the
+       documented copy/rename procedure — preserving any columns later
+       migrations added (order_status etc.) by deriving the new DDL from
+       the live sqlite_master text — then recreates the three indexes.
+       foreign_keys stays OFF during the rebuild so REFERENCES clauses in
+       other tables (master_card_transactions, billing_records) are not
+       rewritten by the RENAME.
+    """
+    conn = sqlite3.connect(db_path, timeout=30.0)
+    try:
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(purchase_attempts)").fetchall()}
+        if not cols:
+            return  # table absent (not a roster db) — nothing to migrate
+        if "abort_requested" not in cols:
+            conn.execute("ALTER TABLE purchase_attempts "
+                         "ADD COLUMN abort_requested INTEGER NOT NULL DEFAULT 0")
+            conn.commit()
+            print("[SCHEMA] Added purchase_attempts.abort_requested")
+
+        ddl = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='purchase_attempts'").fetchone()[0]
+        if "'aborted_operator'" in ddl:
+            return  # CHECK already widened
+        if ddl.count("'retrying'") != 1:
+            # DDL drifted from what this migration understands — refuse to
+            # rebuild rather than risk the purchase ledger.
+            raise RuntimeError(
+                "purchase_attempts DDL unexpected (cannot locate status "
+                "CHECK anchor) — refusing to rebuild")
+        new_ddl = (ddl
+                   .replace("'retrying'", "'retrying','aborted_operator'")
+                   .replace("purchase_attempts", "purchase_attempts_migr_new", 1))
+        conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            conn.execute("BEGIN")
+            conn.execute(new_ddl)
+            conn.execute("INSERT INTO purchase_attempts_migr_new "
+                         "SELECT * FROM purchase_attempts")
+            conn.execute("DROP TABLE purchase_attempts")
+            conn.execute("ALTER TABLE purchase_attempts_migr_new "
+                         "RENAME TO purchase_attempts")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_pa_truck "
+                         "ON purchase_attempts(truck_event_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_pa_nonprofit "
+                         "ON purchase_attempts(nonprofit_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_pa_status "
+                         "ON purchase_attempts(status)")
+            conn.commit()
+            print("[SCHEMA] Widened purchase_attempts.status CHECK "
+                  "(+ 'aborted_operator')")
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.execute("PRAGMA foreign_keys=ON")
+    finally:
+        conn.close()
 
 
 def verify_db(db_path: str):
