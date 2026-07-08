@@ -3330,6 +3330,20 @@ def customer_detail(customer_id):
     return jsonify({"success": True, "data": dict(row)})
 
 
+# Cool-off panel query (GET /api/admin/roster/queue). Only rows the
+# round-robin could actually pick again once the timer lapses — a customer
+# the operator pulled from rotation (in_rotation = 0) or deactivated must
+# drop out of the Cool-off panel immediately, matching the eligible-queue
+# filter's semantics. Module-level so tests can exercise the exact SQL.
+ROSTER_COOLDOWN_SQL = """SELECT id, organization_name, full_name, cooldown_until, last_used_at,
+              last_purchase_at, status, in_rotation
+         FROM customers
+        WHERE cooldown_until IS NOT NULL AND cooldown_until >= datetime('now')
+          AND status = 'active'
+          AND in_rotation = 1
+        ORDER BY cooldown_until ASC"""
+
+
 @bp.route("/api/admin/roster/queue", methods=["GET"])
 @auth.login_required
 def roster_queue():
@@ -3363,13 +3377,7 @@ def roster_queue():
                 ORDER BY last_purchase_at DESC LIMIT 1"""
         ).fetchone()
 
-        cooldowns = c.execute(
-            """SELECT id, organization_name, full_name, cooldown_until, last_used_at,
-                      last_purchase_at, status, in_rotation
-                 FROM customers
-                WHERE cooldown_until IS NOT NULL AND cooldown_until >= datetime('now')
-                ORDER BY cooldown_until ASC"""
-        ).fetchall()
+        cooldowns = c.execute(ROSTER_COOLDOWN_SQL).fetchall()
 
         # Counts for the small meta line in the UI.
         eligible_total = c.execute(

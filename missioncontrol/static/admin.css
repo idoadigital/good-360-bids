@@ -2142,6 +2142,39 @@ table.data.expandable tbody tr.scan-detail td {
 .queue-status.ok  { color: var(--ok); }
 .queue-status.err { color: var(--err); }
 
+/* Per-item "remove from queue" ✕ — destructive, quiet until hovered. */
+.queue-list__item .queue-remove {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-md);
+    color: var(--text-mute);
+    font-size: 12px;
+    line-height: 1;
+    padding: 2px 6px;
+    cursor: pointer;
+}
+.queue-list__item .queue-remove:hover {
+    color: var(--err);
+    border-color: var(--err);
+}
+.queue-list__item .queue-remove:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* Cool-off chip actions: "Re-queue now" is the positive path (back into
+   rotation), so it reads green — the destructive "Remove from queue"
+   next to it uses the standard btn-danger red outline. */
+button.cooldown-clear {
+    color: var(--ok);
+    border-color: var(--ok);
+}
+button.cooldown-clear:hover {
+    background: var(--ok);
+    color: var(--text);
+    border-color: var(--ok);
+}
+
 .customer-chip {
     display: inline-flex;
     align-items: center;

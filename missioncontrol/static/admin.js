@@ -1831,8 +1831,8 @@ async function loadCustomerDetail(id) {
     if (c.cooldown_until) {
         cdCool.innerHTML = `cooldown until ${escape(c.cooldown_until)}
             <button id="cdClearCooldown" class="btn btn-ghost super-only" type="button"
-                    title="Clear cooldown — customer re-enters the queue immediately"
-                    style="font-size:11px;padding:2px 10px;margin-left:6px">✕ clear</button>`;
+                    title="End cool-off early — customer becomes eligible for autobuy again immediately"
+                    style="font-size:11px;padding:2px 10px;margin-left:6px">↻ Re-queue now</button>`;
         $('#cdClearCooldown')?.addEventListener('click', async (ev) => {
             const btn = ev.currentTarget;   // capture: currentTarget is null after await
             btn.disabled = true;
@@ -3355,8 +3355,9 @@ function renderRoster(d) {
     }
 
     // Cool-off — list of customers with active cooldown_until. Each chip
-    // gets a manual-override button so the operator can graduate the
-    // customer back into the queue without waiting out the timer.
+    // gets two manual overrides: "Re-queue now" graduates the customer out
+    // of cooldown early, "Remove from queue" drops them from the autobuy
+    // rotation entirely (same as the Autobuy toggle on the Customers tab).
     const rosterCool = $('#rosterCool');
     if (cool.length) {
         rosterCool.innerHTML = cool.map(c => {
@@ -3367,8 +3368,12 @@ function renderRoster(d) {
                 ${customerChip(c, {accent: 'warn', extra: label, tooltip: until})}
                 <button class="btn btn-ghost cooldown-clear" type="button"
                         data-customer-id="${escape(c.id)}" data-customer-name="${escape(shortName(c))}"
-                        title="Clear cooldown — customer re-enters the queue immediately"
-                        style="font-size:10px;padding:2px 8px">✕ clear</button>
+                        title="End cool-off early — customer becomes eligible for autobuy again immediately"
+                        style="font-size:10px;padding:2px 8px">↻ Re-queue now</button>
+                <button class="btn btn-danger cooldown-remove" type="button"
+                        data-customer-id="${escape(c.id)}" data-customer-name="${escape(shortName(c))}"
+                        title="Take customer out of the autobuy rotation — they will not be picked for any truck"
+                        style="font-size:10px;padding:2px 8px">✕ Remove from queue</button>
             </span>`;
         }).join('');
     } else {
@@ -3377,10 +3382,12 @@ function renderRoster(d) {
     if (rosterCool && !rosterCool._cooldownDelegated) {
         rosterCool._cooldownDelegated = true;
         rosterCool.addEventListener('click', async (ev) => {
-            const btn = ev.target.closest('.cooldown-clear');
+            const btn = ev.target.closest('.cooldown-clear, .cooldown-remove');
             if (!btn || btn.disabled) return;
             btn.disabled = true;
-            const ok = await clearCustomerCooldown(btn.dataset.customerId, btn.dataset.customerName);
+            const action = btn.classList.contains('cooldown-remove')
+                ? removeCustomerFromQueue : clearCustomerCooldown;
+            const ok = await action(btn.dataset.customerId, btn.dataset.customerName);
             btn.disabled = false;
             if (ok) loadScans().catch(() => {});
         });
@@ -3394,6 +3401,25 @@ async function clearCustomerCooldown(customerId, name) {
         const r = await api(`/api/admin/customers/${encodeURIComponent(customerId)}/cooldown`, {method: 'DELETE'})
                     .then(r => r.json());
         if (!r.success) { alert(r.error || 'failed to clear cooldown'); return false; }
+        loadCustomers().catch(() => {});
+        return true;
+    } catch (e) {
+        alert('Network error: ' + (e?.message || e));
+        return false;
+    }
+}
+
+async function removeCustomerFromQueue(customerId, name) {
+    // "Remove from queue" = drop out of the autobuy rotation (in_rotation=0).
+    // Same PATCH as the Autobuy toggle on the Customers tab, which is also
+    // how the customer gets re-added later. Data is untouched.
+    if (!confirm(`Remove ${name || 'this customer'} from the autobuy queue?\n\nThey keep their data and can be re-added anytime with the Autobuy toggle.`)) return false;
+    try {
+        const r = await api(`/api/admin/customers/${encodeURIComponent(customerId)}/rotation`, {
+            method: 'PATCH',
+            body: JSON.stringify({in_rotation: 0}),
+        }).then(r => r.json());
+        if (!r.success) { alert(r.error || 'failed to remove from queue'); return false; }
         loadCustomers().catch(() => {});
         return true;
     } catch (e) {
@@ -3417,6 +3443,18 @@ let _queueSaveTimer = null;
 function renderQueueList(queue) {
     const root = $('#rosterQueueList');
     if (!root) return;
+    if (!root._removeDelegated) {
+        root._removeDelegated = true;
+        root.addEventListener('click', async (ev) => {
+            const btn = ev.target.closest('.queue-remove');
+            if (!btn || btn.disabled) return;
+            ev.stopPropagation();
+            btn.disabled = true;
+            const ok = await removeCustomerFromQueue(btn.dataset.customerId, btn.dataset.customerName);
+            btn.disabled = false;
+            if (ok) loadScans().catch(() => {});
+        });
+    }
     if (!queue.length) {
         root.innerHTML = '';
         $('#rosterQueueStatus').textContent = 'No customers eligible right now';
@@ -3434,6 +3472,10 @@ function renderQueueList(queue) {
     root.innerHTML = queue.map(c => `
         <li class="queue-list__item" draggable="true" data-id="${escape(c.id)}" title="${escape(c.organization_name || c.full_name || c.id)}">
             <span class="queue-name">${escape(shortName(c))}</span>
+            <button class="queue-remove" type="button"
+                    data-customer-id="${escape(c.id)}" data-customer-name="${escape(shortName(c))}"
+                    title="Take customer out of the autobuy rotation — they will not be picked for any truck"
+                    aria-label="Remove from queue">✕</button>
             <span class="queue-handle" aria-hidden="true">⋮⋮</span>
         </li>
     `).join('');
