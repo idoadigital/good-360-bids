@@ -1095,6 +1095,78 @@ def _alert_blocked_purchase(org_name: str, truck_title: str, reason: str,
         pass
 
 
+_CARD_DECLINE_MARKERS = (
+    "card declined", "declined", "invalid card", "cvv",
+    "payment failed", "transaction declined", "transaction failed",
+    "authorization failed", "authorisation failed",
+    "could not process your payment", "unable to process payment",
+    "invalid expir",
+)
+
+
+def _is_card_decline(error_message) -> bool:
+    """True when a checkout failure is a processor card verdict (as opposed
+    to login trouble, page breakage, daemon issues). Mirrors the daemon's
+    decline_markers so both layers classify the same way."""
+    low = str(error_message or "").lower()
+    return any(m in low for m in _CARD_DECLINE_MARKERS)
+
+
+def _suspend_org_autobuy(org_id: int, reason: str) -> None:
+    """Operator directive 2026-07-08: ONE card-caused payment failure
+    suspends the customer's autobuy until the operator re-enables them
+    (dashboard Autobuy toggle) — the roster must never burn a live truck
+    retrying a customer with a broken card, and the advance loop promotes
+    the next ready customer instead.
+
+    Writes eligibility flags ONLY (roster nonprofits.auto_buy_global,
+    dashboard customers.in_rotation). Payment data is never touched —
+    STRICT CARD GUARDRAIL applies. Best-effort: a failure here must not
+    mask the payment failure itself."""
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                "UPDATE nonprofits SET auto_buy_global = 0 WHERE id = ?",
+                (org_id,))
+            row = conn.execute(
+                "SELECT quickbeed_customer_id, org_name FROM nonprofits WHERE id = ?",
+                (org_id,)).fetchone()
+            conn.commit()
+        keys = row.keys() if row is not None and hasattr(row, "keys") else []
+        qb_id = row["quickbeed_customer_id"] if "quickbeed_customer_id" in keys else None
+        org_name = row["org_name"] if "org_name" in keys else f"org {org_id}"
+        if qb_id:
+            import sys as _sys
+            if "/app/missioncontrol" not in _sys.path:
+                _sys.path.insert(0, "/app/missioncontrol")
+            from db import get_conn as _dash_conn  # type: ignore
+            with _dash_conn() as c:
+                c.execute("UPDATE customers SET in_rotation = 0 WHERE id = ?",
+                          (qb_id,))
+        else:
+            logger.warning(f"suspension write-back: org {org_id} has no "
+                           "QuickBeed customer id — dashboard toggle not synced")
+        logger.warning(f"AUTOBUY SUSPENDED for org {org_id} ({org_name}) "
+                       f"after card failure: {str(reason)[:200]}")
+        try:
+            import html as _html
+            import telegram_router
+            telegram_router.send(
+                telegram_router.ADMIN,
+                ("⛔ <b>AUTOBUY SUSPENDED</b> — one-failure policy\n"
+                 f"Org: <b>{_html.escape(str(org_name))}</b>\n"
+                 f"Cause: {_html.escape(str(reason)[:300])}\n"
+                 "The queue advances to the next ready customer. Fix the "
+                 "card, then re-enable via the customer's Autobuy toggle."),
+                source="autobuy_suspension", level="error",
+                title=f"Autobuy suspended: {org_name}")
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"suspension write FAILED for org {org_id}: {e} — "
+                     "customer may be picked again despite the card failure")
+
+
 def _sync_cooldown_to_dashboard(org_id: int, cooldown_until_iso: str) -> None:
     """Mirror a roster cooldown into the dashboard's customers table.
 
@@ -1330,6 +1402,7 @@ def attempt_purchase(org_id: int, truck_event_id: int,
     # readiness-check classifier and the dashboard can't tell WHICH stage
     # the run ended on).
     last_result = None
+    saw_card_decline = False   # any processor card-verdict in this ladder
     for card in payment_methods:
         logger.info(f"Attempting checkout with card #{card['priority']} for org {org_id}")
 
@@ -1400,6 +1473,8 @@ def attempt_purchase(org_id: int, truck_event_id: int,
                 return result
 
             # Card declined / checkout failed
+            if _is_card_decline(result.error_message):
+                saw_card_decline = True
             if card.get("id") is not None:
                 record_card_decline(card["id"])
             update_purchase_attempt(
@@ -1435,6 +1510,12 @@ def attempt_purchase(org_id: int, truck_event_id: int,
     if not test_mode:
         _alert_payment_failure(org.org_name, truck.truck_title, final_err,
                                org_id=org.org_id, org_key=org.org_uuid)
+        if saw_card_decline:
+            # One-failure policy (operator directive 2026-07-08): a
+            # processor card verdict suspends this customer's autobuy until
+            # the operator re-enables them. Non-card failures (login, page
+            # breakage) do NOT suspend — they're not the customer's fault.
+            _suspend_org_autobuy(org_id, final_err)
 
     with get_db_connection() as conn:
         conn.execute(
