@@ -419,6 +419,31 @@ def _ensure_on_product_detail_daemon(page, truck_name: str) -> tuple[bool, str]:
         return False, "no_add_to_cart_after_drill"
 
 
+def _parse_order_total(body_text):
+    """Extract the order total from rendered checkout-page text.
+
+    Prefers amounts on a line labelled as a total ("Order Total", "Grand
+    Total", "Total") because the review page can also render retail/MSRP
+    values that dwarf the real charge. Falls back to the largest
+    two-decimal $-amount on the page (the live_fetch_price heuristic).
+    Returns float or None; never raises.
+    """
+    import re as _re
+    try:
+        amount_re = _re.compile(r'\$\s*([\d,]+\.\d{2})')
+        labeled = []
+        for line in body_text.splitlines():
+            low = line.lower()
+            if 'total' in low and 'retail' not in low and 'msrp' not in low and 'value' not in low:
+                labeled.extend(amount_re.findall(line))
+        candidates = labeled or amount_re.findall(body_text)
+        if not candidates:
+            return None
+        return max(float(a.replace(',', '')) for a in candidates)
+    except Exception:
+        return None
+
+
 class BrowserManager:
     def __init__(self):
         self.playwright = None
@@ -426,6 +451,10 @@ class BrowserManager:
         self.contexts = {}
         self.lock = threading.Lock()
         self.running = True
+        # Last order total parsed from the checkout review page, keyed by
+        # org_key. Keyed (not a single attribute) so concurrent checkouts
+        # for different orgs can't cross-contaminate each other's totals.
+        self.last_order_totals = {}
 
     def start(self):
         log.info("Starting Playwright...")
@@ -640,6 +669,7 @@ class BrowserManager:
         # page write into a fresh buffer. Always finalize in the finally so
         # success and failure both leave a JSON artifact on disk.
         _capture_reset(org_key, truck_name, truck_url)
+        self.last_order_totals.pop(org_key, None)
         status, msg = 'FAILED', 'unknown'
         page = None
         try:
@@ -1255,6 +1285,20 @@ class BrowserManager:
                 page.wait_for_selector(place_btn_sel, state='visible', timeout=15000)
             except Exception:
                 log.warning(f"[{org_key}] Place Order didn't enable in 15s — trying anyway")
+            # The review step (Place Order visible) is the one reliable
+            # moment the real charge amount is on screen — the success
+            # page often shows only the order number. Parse it now;
+            # never let a parse problem interfere with the purchase.
+            try:
+                review_total = _parse_order_total(page.inner_text('body'))
+                if review_total is not None:
+                    self.last_order_totals[org_key] = review_total
+                    log.info(f"[{org_key}] order total on review page: ${review_total:,.2f}")
+                    _capture_step("order_total", {"order_total": review_total})
+                else:
+                    log.warning(f"[{org_key}] no order total found on review page")
+            except Exception as e:
+                log.warning(f"[{org_key}] order-total parse failed: {e}")
             place_btn = page.locator(
                 'button:has-text("Place order"), button:has-text("Place Order")'
             ).first
@@ -1326,6 +1370,12 @@ class BrowserManager:
                 if url_success: detail.append(f"url={cur_url}")
                 if order_num_match: detail.append(f"#={order_num_match.group(0).strip()}")
                 if thanks: detail.append("thank-you-message")
+                if self.last_order_totals.get(org_key) is None:
+                    # Review-page parse missed — try the confirmation page.
+                    conf_total = _parse_order_total(text)
+                    if conf_total is not None:
+                        self.last_order_totals[org_key] = conf_total
+                        log.info(f"[{org_key}] order total from confirmation page: ${conf_total:,.2f}")
                 return 'SUCCESS', f"Order placed ({', '.join(detail)})", time.time() - start_time
 
             for bad in decline_markers:
@@ -1638,6 +1688,7 @@ class Handler(BaseHTTPRequestHandler):
                 'message':      msg,
                 'elapsed':      round(elapsed, 1),
                 'capture_path': _DAEMON_CAPTURE.get('path'),
+                'order_total':  manager.last_order_totals.get(org_key),
             })
 
         if self.path == '/test_checkout':
@@ -1692,6 +1743,7 @@ class Handler(BaseHTTPRequestHandler):
                 'message':      msg,
                 'elapsed':      round(elapsed, 1),
                 'capture_path': _DAEMON_CAPTURE.get('path'),
+                'order_total':  manager.last_order_totals.get(org_key),
             })
 
         if self.path == '/live/navigate':

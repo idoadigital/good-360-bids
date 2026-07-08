@@ -726,10 +726,19 @@ def _run_checkout_via_daemon(org: OrgContext, truck: TruckContext,
         import re as _re
         m = _re.search(r"#=\s*([^,)]+)", d_msg)
         conf = (m.group(1).strip() if m else "") or d_msg[:140]
+        # The daemon parses the real charge off the checkout review page
+        # and returns it in the payload. truck_price is only a fallback —
+        # Good360 hides prices from the scan account, so it's usually 0,
+        # which is how every post-2026-06-12 purchase recorded $0.00.
+        try:
+            daemon_total = payload.get("order_total")
+            daemon_total = float(daemon_total) if daemon_total is not None else None
+        except (TypeError, ValueError):
+            daemon_total = None
         return CheckoutResult(
             success=True, status="success", mode="auto_buy",
             confirmation_number=conf,
-            order_total=float(truck.truck_price) if truck.truck_price else None,
+            order_total=daemon_total or (float(truck.truck_price) if truck.truck_price else None),
             error_message=None)
     if d_status == "CARD_DECLINED":
         return CheckoutResult(success=False, status="failed_checkout", mode="auto_buy",
