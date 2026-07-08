@@ -142,24 +142,41 @@ def _match_org(ch, org_id, org_key):
 
 
 def _post(token, chat_id, text, parse_mode):
-    """One HTTP send. Returns (delivered, error). Never raises."""
-    try:
-        payload = {"chat_id": chat_id, "text": text,
-                   "disable_web_page_preview": True}
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
-        resp = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json=payload, timeout=10)
+    """One HTTP send. Returns (delivered, error). Never raises.
+
+    If a formatted send is rejected because the text isn't valid markup
+    ("can't parse entities" — e.g. a raw error dump with stray < > &),
+    retry once as plain text so a critical alert is never silently
+    dropped over a formatting problem."""
+    def _once(pmode):
         try:
-            result = resp.json()
-        except ValueError:
-            return False, f"HTTP {resp.status_code}: {str(resp.text)[:200]}"
-        if result.get("ok"):
+            payload = {"chat_id": chat_id, "text": text,
+                       "disable_web_page_preview": True}
+            if pmode:
+                payload["parse_mode"] = pmode
+            resp = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json=payload, timeout=10)
+            try:
+                result = resp.json()
+            except ValueError:
+                return False, f"HTTP {resp.status_code}: {str(resp.text)[:200]}", False
+            if result.get("ok"):
+                return True, None, False
+            desc = str(result.get("description") or result)
+            is_parse = "can't parse" in desc.lower()
+            return False, str(result)[:500], is_parse
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}", False
+
+    delivered, err, parse_failed = _once(parse_mode)
+    if not delivered and parse_failed and parse_mode:
+        # Formatting was the problem — resend the exact text unformatted.
+        delivered, err2, _ = _once(None)
+        if delivered:
             return True, None
-        return False, str(result)[:500]
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
+        err = f"parse-mode rejected, plain-text retry also failed: {err2}"
+    return delivered, err
 
 
 def _record(source, message, delivered, error, channel, level, title):

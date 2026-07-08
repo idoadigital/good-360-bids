@@ -188,6 +188,45 @@ check("report: no hardcoded chat IDs",
 check("report: TELEGRAM_CHAT_IDS list removed",
       "TELEGRAM_CHAT_IDS" not in report_src)
 
+# --- 8b. parse-entities 400 falls back to plain text -------------------------
+print("[8b] parse-mode fallback")
+PARSE_FAIL_ONCE = {"chats": set()}
+
+
+class _ParseFailResp:
+    status_code = 400
+    text = '{"ok": false}'
+    def json(self):
+        return {"ok": False, "error_code": 400,
+                "description": "Bad Request: can't parse entities: unexpected '<'"}
+
+
+def fake_post_parsefail(url, json=None, timeout=None):
+    # Reject only the HTML attempt; accept the plain-text retry (no parse_mode).
+    if json.get("parse_mode") and json["chat_id"] in PARSE_FAIL_ONCE["chats"]:
+        return _ParseFailResp()
+    SENT.append((json["chat_id"], json.get("text", ""), json))
+    return _FakeResp()
+
+
+_orig_post = tr.requests.post
+tr.requests.post = fake_post_parsefail
+try:
+    with db.get_conn() as c:
+        row = c.execute("SELECT chat_id FROM telegram_channels WHERE category='admin' LIMIT 1").fetchone()
+    admin_chat = row[0] if row else None
+    PARSE_FAIL_ONCE["chats"].add(admin_chat)
+    SENT.clear()
+    ok = tr.send(tr.ADMIN, "raw <launching> error dump & stray >", source="test",
+                 parse_mode="HTML")
+    check("parse-failure send still delivered (plain-text retry)", ok is True)
+    check("retry sent WITHOUT parse_mode",
+          any(p.get("parse_mode") is None for _, _, p in SENT),
+          f"payloads={[p.get('parse_mode') for *_ , p in SENT]}")
+finally:
+    tr.requests.post = _orig_post
+    PARSE_FAIL_ONCE["chats"].clear()
+
 # --- 9. resolve_channels (payment-failure ADMIN mirror depends on it) --------
 print("[9] resolve_channels")
 check("ngo with channel resolves without fallback",

@@ -699,7 +699,10 @@ def send_error_alert(error_message):
         log_cron(f"Failed to send error alert email: {e}")
 
     tg_msg = sandbox.alert_prefix() + f"Good360 Monitor ERROR\n\nTime: {timestamp}\nError: {error_message}\n\nPlease check the script!\n- E-Comsetter Good360 Monitor"
-    if telegram_router.send(telegram_router.ADMIN, tg_msg, source='monitor', level='error'):
+    # Plain text: raw error dumps carry < > & from browser logs/tracebacks
+    # that a formatted send would reject ("can't parse entities").
+    if telegram_router.send(telegram_router.ADMIN, tg_msg, source='monitor',
+                            level='error', parse_mode=None):
         log_cron("Error alert Telegram sent")
     else:
         log_cron("Failed to send error alert Telegram (see notifications log)")
