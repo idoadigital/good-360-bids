@@ -3502,6 +3502,13 @@ tr.purchase-detail.shown { display: table-row; }
     font-weight: 600;
 }
 .alert-card-buy:hover { filter: brightness(1.1); }
+/* button variant of .alert-card-buy (Initiate autobuy) — strip UA chrome */
+button.alert-card-buy {
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+}
+button.alert-card-buy:disabled { opacity: .55; cursor: wait; }
 .alert-card-dismiss {
     background: transparent;
     border: 1px solid var(--border);

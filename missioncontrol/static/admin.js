@@ -5225,6 +5225,9 @@ function _alertRender() {
             </div>
             <div class="alert-card-status">${escape(it.lastStatus || 'available — no purchase status yet')}</div>
             <div class="alert-card-actions">
+                <button class="alert-card-buy" type="button"
+                        data-alert-initiate="${escape(it.name)}"
+                        data-truck-url="${escape(truckUrl)}">⚡ Initiate autobuy</button>
                 <a class="alert-card-buy" href="${escape(truckUrl)}" target="_blank" rel="noopener">Go Buy →</a>
                 <button class="alert-card-dismiss" type="button" data-alert-dismiss="${escape(it.name)}">dismiss</button>
             </div>
@@ -5274,8 +5277,9 @@ function _alertOnScans(scans) {
     if (newest && Array.isArray(newest.trucks)) {
         for (const t of newest.trucks) {
             const existing = ALERT_SEEN.get(t.name);
+            const keep = (existing && (existing.lastStatus || ''));
             if (existing && !t.available &&
-                !(existing.lastStatus || '').includes('success')) {
+                !keep.includes('success') && !keep.includes('manual autobuy')) {
                 existing.lastStatus = 'no longer available on Good360';
             }
         }
@@ -5312,7 +5316,32 @@ document.getElementById('alertDrawerClear')?.addEventListener('click', () => {
     ALERT_SEEN.clear();
     _alertRender();
 });
-document.getElementById('alertDrawerList')?.addEventListener('click', (e) => {
+document.getElementById('alertDrawerList')?.addEventListener('click', async (e) => {
+    const initBtn = e.target.closest('[data-alert-initiate]');
+    if (initBtn) {
+        const name = initBtn.dataset.alertInitiate;
+        const url = initBtn.dataset.truckUrl;
+        if (!confirm(`Initiate autobuy for:\n${name}\n\nThis dispatches the real purchase pipeline (queue + approval gate). Continue?`)) return;
+        initBtn.disabled = true;
+        initBtn.textContent = 'dispatching…';
+        try {
+            const r = await api('/api/admin/roster/initiate-autobuy', {
+                method: 'POST',
+                body: JSON.stringify({truck_name: name, truck_url: url}),
+            }).then(r => r.json());
+            const info = ALERT_SEEN.get(name);
+            if (r.success) {
+                if (info) info.lastStatus = 'manual autobuy dispatched — watch Purchases';
+            } else {
+                if (info) info.lastStatus = `manual autobuy refused: ${r.error || 'unknown error'}`;
+            }
+        } catch (err) {
+            const info = ALERT_SEEN.get(name);
+            if (info) info.lastStatus = `manual autobuy failed: ${err.message || err}`;
+        }
+        _alertRender();
+        return;
+    }
     const btn = e.target.closest('[data-alert-dismiss]');
     if (!btn) return;
     ALERT_SEEN.delete(btn.dataset.alertDismiss);

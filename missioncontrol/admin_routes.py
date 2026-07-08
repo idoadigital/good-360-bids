@@ -1324,6 +1324,56 @@ def screenshots_by_scan():
 # Scans, purchases, audit (read-only views)
 # ============================================================
 
+def _us_eastern_utcoffset(naive: "datetime") -> "timedelta":
+    """US-Eastern UTC offset for a naive local timestamp (EDT −4 between the
+    second Sunday of March 02:00 and the first Sunday of November 02:00,
+    else EST −5). Dependency-free because the missioncontrol image ships no
+    tzdata package, so zoneinfo('America/New_York') raises there."""
+    import calendar
+    from datetime import datetime as _dt, timedelta as _td
+    y = naive.year
+    def _nth_sunday(month, n):
+        sundays = [d for d in calendar.Calendar().itermonthdates(y, month)
+                   if d.weekday() == 6 and d.month == month]
+        return sundays[n - 1].day
+    dst_start = _dt(y, 3, _nth_sunday(3, 2), 2)
+    dst_end = _dt(y, 11, _nth_sunday(11, 1), 2)
+    return _td(hours=-4) if dst_start <= naive < dst_end else _td(hours=-5)
+
+
+def _monitor_ts_iso(ts) -> str:
+    """Normalize a scans.ts value for the API. The monitor container writes
+    naive 'YYYY-MM-DD HH:MM:SS' strings in America/New_York (its TZ env);
+    browsers parse offset-less strings as the VIEWER'S zone, so anyone not
+    in Eastern saw shifted times. Emit ISO-8601 with the correct offset so
+    the client renders it in the logged-in user's local timezone."""
+    if not ts:
+        return ts
+    s = str(ts).strip()
+    if "T" in s or s.endswith("Z") or "+" in s[10:]:
+        return s  # already ISO / offset-bearing — leave untouched
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        naive = _dt.strptime(s, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return s
+    return naive.replace(tzinfo=_tz(_us_eastern_utcoffset(naive))).isoformat()
+
+
+def _utc_ts_iso(ts) -> str:
+    """Normalize a roster/sqlite timestamp for the API. roster.db values
+    (datetime('now'), datetime.utcnow().isoformat()) are naive UTC; tag them
+    with +00:00 so browsers convert to the viewer's local timezone instead
+    of misreading them as local."""
+    if not ts:
+        return ts
+    s = str(ts).strip()
+    if s.endswith("Z") or "+" in s[10:]:
+        return s
+    s = s.replace(" ", "T", 1)
+    return s + "+00:00"
+
+
 def _read_scans(limit: int, include_trucks: bool = True) -> list[dict]:
     """Return the most recent scans, preferring the SQL `scans` table.
     Falls back to good360_run_log.json if SQL is empty (e.g., immediately
@@ -1353,7 +1403,7 @@ def _read_scans(limit: int, include_trucks: bool = True) -> list[dict]:
                 ).fetchall()
         for r in sql_rows:
             entry = {
-                "time":            r["ts"],
+                "time":            _monitor_ts_iso(r["ts"]),
                 "alert_sent":      bool(r["alert_sent"]),
                 "action":          r["action"] or "",
                 "truck_count":     r["truck_count"],
@@ -2188,6 +2238,11 @@ def _roster_purchase_rows(where_sql: str = "", params: tuple = (), limit: int = 
         d = dict(r)
         # UI-compatible aliases (keep the rich fields too)
         d["ts"]      = d.get("ts") or d.get("started_at")
+        # roster.db timestamps are naive UTC — tag them so the browser
+        # renders them in the viewer's local timezone (see _utc_ts_iso).
+        for _tk in ("ts", "started_at", "completed_at", "order_status_updated_at"):
+            if d.get(_tk):
+                d[_tk] = _utc_ts_iso(d[_tk])
         d["org_id"]  = d.get("org_name") or "—"
         d["truck"]   = d.get("truck_title") or "—"
         d["total"]   = d.get("order_total") if d.get("order_total") is not None else d.get("truck_price")
@@ -2596,6 +2651,80 @@ def redirect_truck_event(event_id: int):
     )
     t.start()
     return jsonify({"success": True, "dispatched": True, "target": target})
+
+
+@bp.route("/api/admin/roster/initiate-autobuy", methods=["POST"])
+@auth.super_admin_required
+def initiate_autobuy():
+    """Operator's manual trigger for a truck the scanner sees as available.
+    Body: {"truck_name": ..., "truck_url": ...}.
+
+    Escape hatch for when the automatic monitor→roster path is down (during
+    the 2026-07-08 incident a truck sat available for 66 minutes while the
+    engine couldn't dispatch). Runs the SAME roster pipeline as the monitor —
+    next-in-queue org selection, live-purchase approval gate, deterministic
+    daemon checkout — never a bypass. Reuses a recent 'detected'/'assigned'
+    truck_event for the URL when one exists, else logs a fresh event, then
+    dispatches in a background thread; the attempt lands in the Purchases
+    panel and the outcome in admin_audit ('truck.redirect_result')."""
+    import sqlite3 as _sqlite
+    import uuid as _uuid
+    from datetime import datetime as _dt
+    body = request.get_json(silent=True) or {}
+    truck_name = (body.get("truck_name") or "").strip()
+    truck_url = (body.get("truck_url") or "").strip()
+    if not truck_name or not truck_url:
+        return jsonify({"success": False,
+                        "error": "truck_name and truck_url required"}), 400
+    if not truck_url.startswith("https://catalog.good360.org/"):
+        return jsonify({"success": False,
+                        "error": "truck_url must be a catalog.good360.org URL"}), 400
+    if not os.path.exists(ROSTER_DB_PATH):
+        return jsonify({"success": False, "error": "roster.db unavailable"}), 503
+
+    try:
+        rconn = _sqlite.connect(ROSTER_DB_PATH, timeout=10.0)
+        try:
+            row = rconn.execute(
+                "SELECT id, status FROM truck_events WHERE truck_url = ? "
+                "AND status IN ('detected','assigned') ORDER BY id DESC LIMIT 1",
+                (truck_url,)).fetchone()
+            if row:
+                event_id = int(row[0])
+                inflight = rconn.execute(
+                    REDIRECT_INFLIGHT_SQL, (event_id,)).fetchone()[0]
+                if inflight:
+                    return jsonify({"success": False,
+                                    "error": "an attempt for this truck is already "
+                                             "in_progress — abort or wait first"}), 409
+                rconn.execute(REDIRECT_TRUCK_RESET_SQL, (event_id,))
+            else:
+                cur = rconn.execute(
+                    """INSERT INTO truck_events
+                       (uuid, detected_at, truck_title, truck_url, truck_price,
+                        truck_location, truck_category, raw_data_json, status, notes)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (str(_uuid.uuid4()), _dt.utcnow().isoformat(), truck_name,
+                     truck_url, None, "", "", None, "detected",
+                     "manual initiate from dashboard"))
+                event_id = int(cur.lastrowid)
+            rconn.commit()
+        finally:
+            rconn.close()
+    except _sqlite.Error as exc:
+        return jsonify({"success": False, "error": f"roster.db error: {exc}"}), 503
+
+    u = auth.current_user() or {}
+    auth.audit("truck.manual_autobuy", target=f"truck_event:{event_id}",
+               detail=f"{truck_name} · {truck_url}"[:500])
+    t = threading.Thread(
+        target=_run_redirect_in_background,
+        args=(event_id, None, u.get("email")),
+        name=f"manual_autobuy_{event_id}",
+        daemon=True,
+    )
+    t.start()
+    return jsonify({"success": True, "dispatched": True, "event_id": event_id})
 
 
 def _load_purchase_row(source: str, attempt_id: int) -> dict | None:
