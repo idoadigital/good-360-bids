@@ -48,6 +48,15 @@ LOCK_STALE_S = 15 * 60
 # Pure half — no browser, unit-testable
 # ---------------------------------------------------------------------------
 
+def _days_apart(iso_a: str | None, iso_b: str | None) -> int:
+    """Whole days between two YYYY-MM-DD strings; huge on parse failure so
+    a malformed date can never satisfy a skew threshold."""
+    from datetime import date
+    try:
+        return abs((date.fromisoformat(iso_a) - date.fromisoformat(iso_b)).days)
+    except (TypeError, ValueError):
+        return 10**6
+
 def sync_rows(org_id: int, site_rows: list[dict],
               verify_screenshot: str | None = None,
               roster_db: str | None = None) -> int:
@@ -69,25 +78,27 @@ def sync_rows(org_id: int, site_rows: list[dict],
     try:
         attempts = conn.execute(
             """SELECT id, confirmation_number, order_total, order_status,
-                      order_status_source, proof
+                      order_status_source, proof, completed_at
                FROM purchase_attempts
                WHERE nonprofit_id = ? AND status = 'success'
                  AND confirmation_number IS NOT NULL""",
             (org_id,)).fetchall()
-        for a in attempts:
-            site = by_order.get(str(a["confirmation_number"]))
-            if site is None:
-                continue
-            if (a["order_status_source"] or "") == "manual":
-                continue  # operator's word beats the site's
+
+        def _apply(a, site, matched_by):
+            nonlocal updated
             new_status = str(site.get("status") or "").strip().lower() or None
             proof = json.loads(a["proof"] or "{}")
-            proof.setdefault("order_id", str(a["confirmation_number"]))
+            proof.setdefault("order_id", str(site["order_id"]))
+            if matched_by == "date":
+                # Keep the checkout evidence string the daemon recorded —
+                # the site's order id replaces it as confirmation_number.
+                proof.setdefault("checkout_evidence", str(a["confirmation_number"]))
             proof.setdefault("verifications", []).append({
                 "at": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
                 "status": new_status,
                 "admin_fee": site.get("admin_fee"),
                 "screenshot": verify_screenshot,
+                "matched_by": matched_by,
             })
             conn.execute(
                 """UPDATE purchase_attempts
@@ -95,10 +106,70 @@ def sync_rows(org_id: int, site_rows: list[dict],
                        order_status_source = 'auto',
                        order_status_updated_at = datetime('now'),
                        order_total = COALESCE(?, order_total),
+                       confirmation_number = ?,
                        proof = ?
                    WHERE id = ?""",
-                (new_status, site.get("admin_fee"), json.dumps(proof), a["id"]))
+                (new_status, site.get("admin_fee"), str(site["order_id"]),
+                 json.dumps(proof), a["id"]))
             updated += 1
+
+        claimed_orders, matched_ids = set(), set()
+        for a in attempts:
+            site = by_order.get(str(a["confirmation_number"]))
+            if site is None:
+                continue
+            matched_ids.add(a["id"])
+            claimed_orders.add(str(site["order_id"]))
+            if (a["order_status_source"] or "") == "manual":
+                continue  # operator's word beats the site's
+            _apply(a, site, "order_id")
+
+        # Fallback: daemon-path successes store an evidence string
+        # ("Order placed (url=..., thank-you-message)") instead of the
+        # site's order number, so they can never exact-match. Pair each
+        # such row with a leftover Order History row by date — but only
+        # when the pairing is unambiguous (exactly one attempt and one
+        # site row on that date for this org). Site dates are MM/DD/YYYY;
+        # a second pass allows ±1 day for midnight/timezone skew, still
+        # requiring a unique 1:1 pairing.
+        def _site_date(r):
+            try:
+                mm, dd, yyyy = str(r.get("date") or "").split("/")
+                return f"{yyyy}-{mm}-{dd}"
+            except ValueError:
+                return None
+
+        pending = [a for a in attempts
+                   if a["id"] not in matched_ids
+                   and (a["order_status_source"] or "") != "manual"
+                   and not str(a["confirmation_number"]).startswith("DRYRUN")
+                   and not str(a["confirmation_number"]).isdigit()
+                   and a["completed_at"]]
+        leftovers = [r for r in site_rows
+                     if str(r.get("order_id")) not in claimed_orders
+                     and _site_date(r)]
+
+        for max_skew in (0, 1):
+            for a in list(pending):
+                a_date = str(a["completed_at"])[:10]
+                cands = [r for r in leftovers if _days_apart(_site_date(r), a_date) <= max_skew]
+                if len(cands) != 1:
+                    continue
+                site = cands[0]
+                # The site row must also have exactly one attempt in range,
+                # or two purchases on nearby days could race for it.
+                contenders = [p for p in pending
+                              if p["id"] != a["id"]
+                              and _days_apart(_site_date(site),
+                                              str(p["completed_at"])[:10]) <= max_skew]
+                if contenders:
+                    continue
+                _apply(a, site, "date")
+                pending.remove(a)
+                leftovers.remove(site)
+                logger.info(f"order sync: org {org_id} attempt {a['id']} "
+                            f"date-matched to order {site['order_id']} "
+                            f"(skew<={max_skew}d)")
         conn.commit()
     finally:
         conn.close()
