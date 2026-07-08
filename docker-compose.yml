@@ -78,6 +78,40 @@ services:
       - ./good360_watchdog.py:/app/good360_watchdog.py:ro
       - ./feature_flags.py:/app/feature_flags.py:ro
 
+  self-heal:
+    image: good360-monitor:local
+    restart: always
+    init: true
+    command: python self_heal.py
+    env_file: .env
+    environment:
+      # External liveness ping (healthchecks.io). The real value is
+      # https://hc-ping.com/<uuid> and lives ONLY in the prod .env — never
+      # commit the UUID to the repo. Unset -> self_heal skips the ping.
+      HEALTHCHECKS_PING_URL: ${HEALTHCHECKS_PING_URL:-}
+      SELF_HEAL_DAEMON_CONTAINER: good-360-bids-daemon-1
+      SELF_HEAL_MONITOR_CONTAINER: good-360-bids-monitor-1
+    volumes:
+      - workdir:/app/workdir
+      - roster_data:/app/good360_roster/db
+      # Bind-mount so self-heal edits land without an image rebuild
+      # (matches the pattern used for monitor / watchdog / telegram-bot).
+      - ./self_heal.py:/app/self_heal.py:ro
+      - ./healthcheck.py:/app/healthcheck.py:ro
+      - ./telegram_router.py:/app/telegram_router.py:ro
+      - ./notifications_log.py:/app/notifications_log.py:ro
+      - ./feature_flags.py:/app/feature_flags.py:ro
+      - ./settings_bootstrap.py:/app/settings_bootstrap.py:ro
+      # Dashboard modules: the router's channel registry and the
+      # notifications table (error-burst check) live in dashboard.db,
+      # reached through missioncontrol/db.py.
+      - ./missioncontrol:/app/missioncontrol:ro
+      # Needed to restart the daemon/monitor siblings. WARNING: the docker
+      # socket grants effective host root — self_heal.py's bounded playbook
+      # is the only thing this container runs.
+      - /var/run/docker.sock:/var/run/docker.sock
+    # NO published ports: self-heal serves nothing.
+
   telegram-bot:
     image: good360-monitor:local
     restart: always

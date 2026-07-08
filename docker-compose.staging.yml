@@ -93,6 +93,33 @@ services:
       - ./good360_watchdog.py:/app/good360_watchdog.py:ro
       - ./feature_flags.py:/app/feature_flags.py:ro
 
+  self-heal:
+    image: good360-monitor:staging
+    restart: always
+    init: true
+    command: python self_heal.py
+    env_file: .env
+    environment:
+      # Staging never pings prod's healthchecks.io check — leave unset here.
+      HEALTHCHECKS_PING_URL: ${HEALTHCHECKS_PING_URL:-}
+      SELF_HEAL_DAEMON_CONTAINER: good-360-bids-staging-daemon-1
+      SELF_HEAL_MONITOR_CONTAINER: good-360-bids-staging-monitor-1
+      # Non-prod gate: log + alert as usual (alerts are already muted by
+      # ENABLE_NOTIFICATIONS=false in this .env) but perform NO container
+      # restarts and NO database writes.
+      SELF_HEAL_DRY_RUN: "true"
+    volumes:
+      - workdir:/app/workdir
+      - roster_data:/app/good360_roster/db
+      - ./self_heal.py:/app/self_heal.py:ro
+      - ./healthcheck.py:/app/healthcheck.py:ro
+      - ./telegram_router.py:/app/telegram_router.py:ro
+      - ./notifications_log.py:/app/notifications_log.py:ro
+      - ./feature_flags.py:/app/feature_flags.py:ro
+      - ./settings_bootstrap.py:/app/settings_bootstrap.py:ro
+      - ./missioncontrol:/app/missioncontrol:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+
   missioncontrol-staging:
     image: good360-monitor:staging
     restart: always
