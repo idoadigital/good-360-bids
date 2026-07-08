@@ -182,6 +182,12 @@ CHECKOUT_WORKER_TIMEOUT = int(os.environ.get("DAEMON_CHECKOUT_WORKER_TIMEOUT", "
 LIVE_WORKER_TIMEOUT = int(os.environ.get("DAEMON_LIVE_WORKER_TIMEOUT", "420"))
 NAV_WORKER_TIMEOUT = int(os.environ.get("DAEMON_NAV_WORKER_TIMEOUT", "120"))
 SCREENSHOT_WORKER_TIMEOUT = int(os.environ.get("DAEMON_SCREENSHOT_WORKER_TIMEOUT", "30"))
+# How long to wait after clicking Add-to-Cart for the site to resolve the
+# round-trip (truck-quote modal, mini-cart open, or a GraphQL error). On
+# 2026-07-08 addSimpleProductsToCart took ~16.5s server-side and the old
+# fixed 4s modal + 10s mini-cart waits gave up ~2s before the response
+# landed; the late add then poisoned the cart for the next attempt.
+ADD_TO_CART_RESULT_TIMEOUT = int(os.environ.get("DAEMON_ADD_TO_CART_RESULT_TIMEOUT", "45"))
 # A browser job older than this is considered wedged; the self-watchdog
 # exits the process so docker's restart:always brings up a fresh browser.
 JOB_HARD_CAP_SECONDS = int(os.environ.get("DAEMON_JOB_HARD_CAP_SECONDS", "900"))
@@ -459,6 +465,44 @@ def _ensure_on_product_detail_daemon(page, truck_name: str) -> tuple[bool, str]:
         return True, "drilled_via_structured"
     except Exception:
         return False, "no_add_to_cart_after_drill"
+
+
+def _empty_cart_if_needed(page, org_key):
+    """Enforce the empty-cart precondition in code. A stale item in the
+    customer's persistent Magento cart breaks truck checkout (truckloads
+    can't be mixed with anything) — on 2026-07-08 a slow add-to-cart from a
+    timed-out attempt landed in the cart after the fact and the very next
+    attempt failed with 'Could not add the product to the shopping cart'.
+    Best-effort: any failure here is logged and the checkout proceeds (the
+    truck-quote modal path still copes with a non-empty cart)."""
+    try:
+        trigger = page.locator('button[class*="cartTrigger"]').first
+        if not trigger.count():
+            return
+        counter = page.locator('[class*="cartTrigger-counter"]').first
+        if not counter.count():
+            return  # no badge → cart is empty
+        qty = (counter.inner_text() or "").strip()
+        if qty in ("", "0"):
+            return
+        log.info(f"[{org_key}] cart not empty (counter={qty!r}) — clearing it before Add-to-Cart")
+        _capture_step("empty_stale_cart", {"counter": qty})
+        trigger.click()
+        page.wait_for_selector('aside[class*="miniCart"]', state='visible', timeout=8000)
+        for _ in range(10):
+            rm = page.locator('aside[class*="miniCart"] button:has-text("Remove")').first
+            if not rm.count() or not rm.is_visible(timeout=2000):
+                break
+            rm.click()
+            page.wait_for_timeout(1500)
+        page.keyboard.press('Escape')
+        try:
+            page.wait_for_selector('aside[class*="miniCart"]', state='hidden', timeout=5000)
+        except Exception:
+            pass
+        log.info(f"[{org_key}] stale cart cleared")
+    except Exception as e:
+        log.warning(f"[{org_key}] empty-cart precondition check failed (continuing): {e}")
 
 
 def _parse_order_total(body_text):
@@ -809,12 +853,20 @@ class BrowserManager:
                 status = 'FAILED'
                 return status, msg, time.time() - start_time
 
+            # Enforce the empty-cart precondition before touching Add-to-Cart
+            # (stale items break truck checkout — see _empty_cart_if_needed).
+            _empty_cart_if_needed(page, org_key)
+
             # Add to cart
             _capture_step("add_to_cart")
             add_btn = page.locator('button:has-text("Add to Cart"), a:has-text("Add to Cart"), [class*="add-to-cart"]').first
             if not add_btn.is_visible(timeout=3000):
                 status, msg = 'FAILED', 'Add to Cart not found'
                 return status, msg, time.time() - start_time
+            # Index into the capture's network log taken just before the
+            # click, so the resolution loop below only inspects GraphQL
+            # traffic caused by this click.
+            add_net_idx = len(_DAEMON_CAPTURE.get("network", []))
             add_btn.click()
             # Abort checkpoint (b): after navigate + add-to-cart. Items in a
             # cart cost nothing — safe to walk away here.
@@ -823,67 +875,104 @@ class BrowserManager:
                 status, msg = aborted
                 return status, msg, time.time() - start_time
 
-            # Truck Quote Request modal handling. Trucks DON'T go through
-            # the normal cart/checkout flow — Good360 pops a react-confirm
-            # overlay saying "Full truckload can not be mixed with general
-            # products. Press Continue to empty cart and get a truckload
-            # quote." Without dismissing this dialog, every subsequent
-            # click hits the overlay and silently fails (this was the
-            # actual cause of all the "Place Order button not found" and
-            # "No Checkout button" failures).
-            _capture_step("post_add_modal_check")
-            # The truck-quote modal only appears when the cart had other
-            # items before this add. On a fresh cart (which force_login
-            # always gives us) the modal is skipped and the mini-cart
-            # sidebar opens directly. Don't use body-text fallbacks —
-            # "Truck Quote Request" appears as descriptive copy on the
-            # product page itself, so a text check false-positives.
+            # Add-to-Cart resolution loop. Three things can happen after the
+            # click, in any order and — when Good360 is slow — tens of
+            # seconds later (2026-07-08: addSimpleProductsToCart took ~16.5s
+            # server-side and the old fixed 4s modal + 10s mini-cart waits
+            # gave up ~2s early):
+            #   (a) the addSimpleProductsToCart GraphQL response comes back
+            #       with errors ("Could not add the product to the shopping
+            #       cart") — fail loudly with the server's own message;
+            #   (b) the Truck Quote Request react-confirm overlay appears
+            #       (cart had other items — "Full truckload can not be mixed
+            #       with general products") — click Continue and keep
+            #       waiting. Without dismissing it every subsequent click
+            #       hits the overlay and silently fails. Don't use body-text
+            #       fallbacks to detect it — "Truck Quote Request" appears as
+            #       descriptive copy on the product page itself;
+            #   (c) the slide-in mini-cart opens on the right with the truck
+            #       added and a "Checkout" button — proceed. There is NO
+            #       standalone cart URL (/marketplace/cart 404s); the entire
+            #       cart UI is this `<aside class="miniCart-*">` sidebar.
+            # The capture listener already records every response body into
+            # _DAEMON_CAPTURE['network'], so the GraphQL outcome is read from
+            # there instead of racing a second network listener.
+            _capture_step("await_add_result")
             continue_btn_sel = (
                 'div.react-confirm-alert-body button:has-text("Continue"), '
                 '#react-confirm-alert button:has-text("Continue")'
             )
-            modal_visible = False
-            try:
-                page.wait_for_selector(continue_btn_sel, state='visible', timeout=4000)
-                modal_visible = True
-                log.info(f"[{ctx['org_key']}] Truck Quote modal detected (Continue button visible)")
-            except Exception:
-                log.info(f"[{ctx['org_key']}] no modal — cart was empty so the truck added directly")
-            if modal_visible:
-                # Click "Continue" to clear cart and add the truck.
-                _capture_step("click_modal_continue")
-                page.locator(continue_btn_sel).first.click()
-                log.info(f"[{org_key}] clicked Continue on Truck Quote modal")
-                # Wait for the overlay to detach so subsequent clicks
-                # don't get intercepted by the dismissing modal.
+            minicart_sel = 'aside[class*="miniCart"]'
+            add_deadline = time.time() + ADD_TO_CART_RESULT_TIMEOUT
+            mutation_seen = False
+            minicart_open = False
+            modal_continued = False
+            while time.time() < add_deadline:
+                # (a) GraphQL traffic caused by this click
+                mutation_error = None
+                for entry in _DAEMON_CAPTURE.get("network", [])[add_net_idx:]:
+                    body = entry.get("body") or ""
+                    if 'graphql' not in (entry.get("url") or "") or 'addSimpleProductsToCart' not in body:
+                        continue
+                    mutation_seen = True
+                    if '"errors"' in body:
+                        try:
+                            errs = json.loads(body).get("errors") or []
+                            mutation_error = "; ".join(
+                                e.get("message", "") for e in errs) or "unknown GraphQL error"
+                        except Exception:
+                            mutation_error = "unrecognised GraphQL error payload"
+                if mutation_error:
+                    status, msg = 'FAILED', f'Good360 rejected Add-to-Cart: {mutation_error}'
+                    return status, msg, time.time() - start_time
+                # (b) truck-quote modal
                 try:
-                    page.wait_for_selector(
-                        'div.react-confirm-alert-overlay',
-                        state='detached',
-                        timeout=8000,
-                    )
+                    modal_btn = page.locator(continue_btn_sel).first
+                    if not modal_continued and modal_btn.count() and modal_btn.is_visible():
+                        log.info(f"[{org_key}] Truck Quote modal detected — clicking Continue")
+                        _capture_step("click_modal_continue")
+                        modal_btn.click()
+                        modal_continued = True
+                        # Wait for the overlay to detach so subsequent clicks
+                        # don't get intercepted by the dismissing modal.
+                        try:
+                            page.wait_for_selector('div.react-confirm-alert-overlay',
+                                                   state='detached', timeout=8000)
+                        except Exception:
+                            pass
                 except Exception:
                     pass
-                time.sleep(2)
+                # (c) mini-cart open?
+                try:
+                    mc = page.locator(minicart_sel).first
+                    if mc.count() and mc.is_visible():
+                        minicart_open = True
+                        break
+                except Exception:
+                    pass
+                # wait_for_timeout (not time.sleep) so Playwright keeps
+                # dispatching the response events the capture listener needs
+                page.wait_for_timeout(500)
 
-            # After Continue, Good360 opens a slide-in mini-cart on the
-            # right with the truck added and a "Checkout" button. There
-            # is NO standalone cart URL — /marketplace/cart 404s. The
-            # entire cart UI is this sidebar inside `<aside class="miniCart-*">`.
-            _capture_step("await_minicart")
-            try:
-                page.wait_for_selector(
-                    'aside[class*="miniCart"]',
-                    state='visible',
-                    timeout=10000,
-                )
-            except Exception:
-                pass
-            minicart = page.locator('aside[class*="miniCart"]').first
-            if not minicart.count() or not minicart.is_visible(timeout=1500):
-                status, msg = 'FAILED', 'Mini-cart sidebar did not open after Add-to-Cart'
+            if not minicart_open and mutation_seen:
+                # The add succeeded server-side but the sidebar never
+                # animated open — poke the header cart trigger once.
+                log.info(f"[{org_key}] add landed server-side but mini-cart stayed closed — opening via header trigger")
+                _capture_step("open_minicart_via_trigger")
+                try:
+                    page.locator('button[class*="cartTrigger"]').first.click()
+                    page.wait_for_selector(minicart_sel, state='visible', timeout=5000)
+                    minicart_open = True
+                except Exception:
+                    pass
+            if not minicart_open:
+                detail = ("add-to-cart request confirmed server-side — the truck may now sit "
+                          "in the customer's cart; clear it before retrying" if mutation_seen
+                          else "no add-to-cart request observed — the click likely never registered")
+                status, msg = 'FAILED', f'Mini-cart sidebar did not open after Add-to-Cart ({detail})'
                 return status, msg, time.time() - start_time
 
+            minicart = page.locator(minicart_sel).first
             log.info(f"[{org_key}] mini-cart open — clicking Checkout inside it")
             _capture_step("click_minicart_checkout")
             mc_checkout = minicart.locator('button:has-text("Checkout")').first
@@ -1935,7 +2024,12 @@ class Handler(BaseHTTPRequestHandler):
                     cached = manager.contexts.pop(org_key, None)
                 if cached is not None:
                     try:
-                        cached['context'].close()
+                        # Sync-Playwright objects are bound to the thread
+                        # that created them — close on the browser worker,
+                        # not this HTTP thread. Closing here raised "Cannot
+                        # switch to a different thread" and leaked the old
+                        # page alive (2026-07-08 incident).
+                        worker.call(cached['context'].close, timeout=20)
                         log.info(f"[{org_key}] force_login: closed and dropped cached BrowserContext")
                     except Exception as e:
                         log.warning(f"[{org_key}] force_login: context close failed: {e}")
