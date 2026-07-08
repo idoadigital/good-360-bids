@@ -188,6 +188,21 @@ check("report: no hardcoded chat IDs",
 check("report: TELEGRAM_CHAT_IDS list removed",
       "TELEGRAM_CHAT_IDS" not in report_src)
 
+# --- 9. resolve_channels (payment-failure ADMIN mirror depends on it) --------
+print("[9] resolve_channels")
+check("ngo with channel resolves without fallback",
+      len(tr.resolve_channels(tr.NGO, org_key="hope4humanity",
+                              fallback=False)) == 1)
+check("ngo without channel + fallback=False resolves empty",
+      tr.resolve_channels(tr.NGO, org_key="no_such_org", fallback=False) == [])
+check("ngo without channel + fallback resolves to admin",
+      all(c["category"] == tr.ADMIN
+          for c in tr.resolve_channels(tr.NGO, org_key="no_such_org"))
+      and len(tr.resolve_channels(tr.NGO, org_key="no_such_org")) >= 1)
+check("payment-failure mirror wired in autobuy_v2",
+      "resolve_channels" in open("/app/good360_roster/good360_autobuy_v2.py",
+                                 encoding="utf-8").read())
+
 # ----------------------------------------------------------------------------
 if failures:
     print("\nFAIL:")

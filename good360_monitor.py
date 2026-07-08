@@ -1013,6 +1013,13 @@ def send_checkout_failure_alert(truck_name, truck_url, status, message, org_name
     tg_msg = "AUTO-PURCHASE FAILED\n\nTruck: " + truck_name + org_text + "\nStatus: " + status + "\nReason: " + safe_message + "\nDetected: " + now + detail_text + "\n\nManual link:\n" + truck_url + "\n\n- E-Comsetter Good360 Monitor"
     telegram_router.send(telegram_router.NGO, sandbox.decorate_alert(tg_msg),
                          org_key=org_key, source='monitor', level='error')
+    # Purchase failures are customer-specific issues the system channel
+    # must also carry (operator directive 2026-07-08). Mirror to ADMIN —
+    # unless the NGO send already fell back there (no channel for the org).
+    if telegram_router.resolve_channels(telegram_router.NGO,
+                                        org_key=org_key, fallback=False):
+        telegram_router.send(telegram_router.ADMIN, sandbox.decorate_alert(tg_msg),
+                             source='monitor', level='error')
     print("Checkout failure alert sent for: " + truck_name)
 
 

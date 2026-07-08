@@ -114,6 +114,24 @@ def _env_fallback_channels():
              "category": ADMIN, "org_id": None, "org_key": None}]
 
 
+def resolve_channels(category, *, org_id=None, org_key=None, fallback=True):
+    """Read-only: the enabled channel rows a send() with these args would
+    target. With fallback=False, an NGO lookup returns [] instead of the
+    admin channels when the org has no channel — callers use this to decide
+    whether an extra ADMIN mirror send would duplicate the fallback."""
+    category = str(category or "").strip().lower()
+    channels = _load_channels()
+    if channels is None:
+        channels = _env_fallback_channels()
+    if category == NGO:
+        matched = [c for c in channels
+                   if c["category"] == NGO and _match_org(c, org_id, org_key)]
+        if matched or not fallback:
+            return matched
+        return [c for c in channels if c["category"] == ADMIN]
+    return [c for c in channels if c["category"] == category]
+
+
 def _match_org(ch, org_id, org_key):
     if org_key and ch.get("org_key") and str(ch["org_key"]) == str(org_key):
         return True

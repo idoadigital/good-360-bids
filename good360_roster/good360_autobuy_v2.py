@@ -1064,8 +1064,10 @@ def _alert_blocked_purchase(org_name: str, truck_title: str, reason: str,
            "does not approve. Investigate how this org was selected.")
     try:
         import telegram_router  # repo root is on sys.path (see module top)
+        # ADMIN, not NGO: a tripped approval gate means an internal
+        # selection bug — operator material, never a customer's channel.
         telegram_router.send(
-            telegram_router.NGO, msg, org_id=org_id, org_key=org_key,
+            telegram_router.ADMIN, msg,
             source="autobuy_approval_gate", level="error",
             title=f"Purchase blocked: {org_name}")
     except Exception:  # noqa: BLE001
@@ -1121,9 +1123,10 @@ def _alert_payment_failure(org_name: str, truck_title: str, error: str,
                            org_key: str | None = None) -> None:
     """STRICT CARD GUARDRAIL companion (operator directive 2026-06-12):
     when a live payment fails, the processor's error message goes out
-    verbatim — routed to the org's NGO channel, falling back to the admin
-    channels when the org has none. The transaction is failed and left
-    alone — no card substitution, no payment-data modification.
+    verbatim — to the org's NGO channel AND the admin channels (operator
+    directive 2026-07-08: payment failures are customer-specific issues
+    the system channel must also carry). The transaction is failed and
+    left alone — no card substitution, no payment-data modification.
     Best-effort delivery; the router never raises."""
     import html as _html
     msg = ("💳 <b>PAYMENT FAILED — transaction stopped</b>\n"
@@ -1138,6 +1141,16 @@ def _alert_payment_failure(org_name: str, truck_title: str, error: str,
             telegram_router.NGO, msg, org_id=org_id, org_key=org_key,
             source="autobuy_payment_failure", level="error",
             title=f"Payment failed: {org_name}")
+        # Mirror to the admin channels — but only when an NGO channel
+        # actually took the first send, else the fallback already landed
+        # it on admin and this would duplicate.
+        if telegram_router.resolve_channels(
+                telegram_router.NGO, org_id=org_id, org_key=org_key,
+                fallback=False):
+            telegram_router.send(
+                telegram_router.ADMIN, msg,
+                source="autobuy_payment_failure", level="error",
+                title=f"Payment failed: {org_name}")
     except Exception:  # noqa: BLE001
         pass
 
