@@ -187,7 +187,7 @@ def check_external_liveness(daemon_ok: bool) -> None:
 # Playbook item 2: close stale in_progress purchase attempts (bookkeeping)
 # ---------------------------------------------------------------------------
 
-def check_stale_attempts() -> None:
+def check_stale_attempts(state: dict | None = None) -> None:
     if not os.path.exists(ROSTER_DB):
         print(f"[SELF-HEAL] roster db not found ({ROSTER_DB}) — skipping")
         return
@@ -219,10 +219,20 @@ def check_stale_attempts() -> None:
         if stale:
             ids = ", ".join(str(i) for i, _ in stale)
             suffix = " [DRY RUN — no DB write]" if _dry_run() else ""
-            alert(f"🩹 Self-heal: closed {len(stale)} stale in_progress "
-                  f"purchase attempt(s) (older than {STALE_ATTEMPT_HOURS}h): "
-                  f"id(s) {ids}{suffix}",
-                  level="warn", title="Self-heal: stale attempts closed")
+            # Rate-limit the ALERT (not the closes): should the row close
+            # fail — or in dry-run, where nothing closes — the same rows
+            # stay stale every cycle and would spam admin once a minute.
+            if state is None or _rate_limit_ok(state, "last_stale_alert", 2 * 3600):
+                alert(f"🩹 Self-heal: closed {len(stale)} stale in_progress "
+                      f"purchase attempt(s) (older than {STALE_ATTEMPT_HOURS}h): "
+                      f"id(s) {ids}{suffix}",
+                      level="warn", title="Self-heal: stale attempts closed")
+                if state is not None:
+                    state["last_stale_alert"] = _now_utc().isoformat()
+                    save_state(state)
+            else:
+                print(f"[SELF-HEAL] stale-attempt alert suppressed "
+                      f"(rate limit): id(s) {ids}")
         else:
             print("[SELF-HEAL] no stale in_progress purchase attempts")
     finally:
@@ -358,7 +368,7 @@ def run_cycle(state, daemon_fail_history) -> None:
         daemon_ok, daemon_detail = False, f"probe crashed: {e}"
     checks = (
         ("external-liveness", lambda: check_external_liveness(daemon_ok)),
-        ("stale-attempts", check_stale_attempts),
+        ("stale-attempts", lambda: check_stale_attempts(state)),
         ("daemon-wedge", lambda: check_daemon_wedge(
             state, daemon_ok, daemon_detail, daemon_fail_history)),
         ("monitor-stale", lambda: check_monitor_stale(state)),
