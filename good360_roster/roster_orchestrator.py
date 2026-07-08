@@ -130,10 +130,26 @@ def get_truck_event(event_id: int) -> sqlite3.Row:
         conn.close()
 
 # ─── Core Orchestration Logic ───────────────────────────────────────────────────
+# attempt_purchase outcomes that mean "this org failed, the truck may still
+# be buyable — advance to the next org in the roster". Everything else is
+# terminal for the truck: success/dry_run_ok (bought), truck_gone (sold out),
+# alerted_manual (alert-only flow took it).
+RETRYABLE_STATUSES = {"failed_checkout", "failed_payment"}
+
+
 def handle_truck_event(event_id: int, auto_run: bool = True) -> dict:
     """
     Main entry point for processing a truck event.
-    Returns dict with outcome summary.
+
+    Walks DOWN the roster: if the selected org's purchase fails (bad card,
+    bad credentials, approval-gate block, checkout error) the org is excluded
+    for this truck and the next eligible org is tried immediately — a failing
+    customer must never jam the queue while the truck is still available.
+    Category-excluded / over-price-cap orgs are skipped the same way instead
+    of marking the truck missed. Bounded by max_orgs_per_truck (config,
+    default 5 purchase attempts).
+
+    Returns dict with outcome summary (or the last CheckoutResult).
     """
     with QUEUE_LOCK:
         truck = get_truck_event(event_id)
@@ -150,55 +166,98 @@ def handle_truck_event(event_id: int, auto_run: bool = True) -> dict:
         log_system_event("orchestrator_truck_start", "info", None,
                         f"Processing truck event {event_id}: {truck['truck_title']}")
 
-        # Step 1: Find next available org
         find_next, get_cat_pref, _ = get_queue()
-        org = find_next(truck_category, truck_price)
-        if not org:
-            logger.warning("No available orgs in queue")
-            update_truck_status(event_id, "missed", notes="No available orgs in queue")
-            return {"status": "no_org_available", "event_id": event_id}
+        try:
+            max_attempts = int(get_config("max_orgs_per_truck", "5"))
+        except (TypeError, ValueError):
+            max_attempts = 5
 
-        org_id = org["id"]
-        org_name = org["org_name"]
-        logger.info(f"Selected org #{org_id}: {org_name} (queue_pos={org['queue_position']})")
+        tried_org_ids: list = []   # skipped OR failed for THIS truck
+        attempts_made = 0          # real purchase attempts only
+        last_result = None
 
-        # Step 2: Check category preferences
-        cat_pref = get_cat_pref(org_id, truck_category)
-        if cat_pref:
-            if cat_pref["is_excluded"]:
-                logger.info(f"Category {truck_category} is EXCLUDED for org {org_id} — skipping silently")
-                update_truck_status(event_id, "missed", org_id,
-                                   notes=f"Category {truck_category} excluded for {org_name}")
-                return {"status": "category_excluded", "event_id": event_id, "org_id": org_id}
+        while True:
+            org = find_next(truck_category, truck_price,
+                            exclude_org_ids=tuple(tried_org_ids))
+            if not org:
+                if attempts_made:
+                    note = (f"All eligible orgs exhausted after {attempts_made} "
+                            f"failed attempt(s) (orgs tried: {tried_org_ids})")
+                    logger.warning(note)
+                    log_system_event("orchestrator_all_orgs_failed", "error", None,
+                                     f"Truck event {event_id}: {note}")
+                    update_truck_status(event_id, "missed", tried_org_ids[-1], notes=note)
+                    return last_result
+                logger.warning("No available orgs in queue")
+                update_truck_status(event_id, "missed", notes="No available orgs in queue")
+                return {"status": "no_org_available", "event_id": event_id}
 
-            if not cat_pref["auto_buy_enabled"]:
-                # Alert-only mode
-                logger.info(f"Org {org_id} alert-only mode for {truck_category}")
-                update_truck_status(event_id, "assigned", org_id)
-                alert_only_timer(event_id, org_id)
-                return {"status": "alert_only", "event_id": event_id, "org_id": org_id}
+            org_id = org["id"]
+            org_name = org["org_name"]
+            logger.info(f"Selected org #{org_id}: {org_name} (queue_pos={org['queue_position']})")
 
-            # Check price cap
-            max_price = (cat_pref["max_price_override"] or
-                        org["max_price_override"] or
-                        float(get_config("default_max_price", "6400")))
-            if truck_price > max_price:
-                logger.warning(f"Truck price ${truck_price} exceeds max ${max_price} for org {org_id}")
-                update_truck_status(event_id, "missed", org_id,
-                                   notes=f"Price ${truck_price} > max ${max_price}")
-                return {"status": "price_exceeded", "event_id": event_id, "org_id": org_id}
-        else:
-            # No category pref = allow all, auto-buy enabled by default
-            pass
+            # Category preferences: excluded / over-cap orgs step aside for
+            # the NEXT org instead of consuming the truck.
+            cat_pref = get_cat_pref(org_id, truck_category)
+            if cat_pref:
+                if cat_pref["is_excluded"]:
+                    logger.info(f"Category {truck_category} is EXCLUDED for org {org_id} — trying next org")
+                    tried_org_ids.append(org_id)
+                    continue
 
-        # Step 3: Attempt purchase
-        if not auto_run:
-            return {"status": "would_attempt_purchase", "event_id": event_id, "org_id": org_id}
+                if not cat_pref["auto_buy_enabled"]:
+                    # Alert-only mode: this org takes the truck manually.
+                    logger.info(f"Org {org_id} alert-only mode for {truck_category}")
+                    update_truck_status(event_id, "assigned", org_id)
+                    alert_only_timer(event_id, org_id)
+                    return {"status": "alert_only", "event_id": event_id, "org_id": org_id}
 
-        update_truck_status(event_id, "assigned", org_id)
-        attempt_purchase_fn, _, _ = get_autobuy()
-        result = attempt_purchase_fn(org_id, event_id)
-        return result
+                max_price = (cat_pref["max_price_override"] or
+                            org["max_price_override"] or
+                            float(get_config("default_max_price", "6400")))
+                if truck_price > max_price:
+                    logger.warning(f"Truck price ${truck_price} exceeds max ${max_price} "
+                                   f"for org {org_id} — trying next org")
+                    tried_org_ids.append(org_id)
+                    continue
+
+            if not auto_run:
+                return {"status": "would_attempt_purchase", "event_id": event_id, "org_id": org_id}
+
+            update_truck_status(event_id, "assigned", org_id)
+            attempt_purchase_fn, _, _ = get_autobuy()
+            result = attempt_purchase_fn(org_id, event_id)
+            last_result = result
+            status = getattr(result, "status", None)
+
+            if getattr(result, "success", False) or status not in RETRYABLE_STATUSES:
+                # success / dry_run_ok / truck_gone / alerted_manual — terminal.
+                return result
+
+            attempts_made += 1
+            tried_org_ids.append(org_id)
+            err = getattr(result, "error_message", "") or ""
+
+            # Environment kill-switch: every org would fail identically —
+            # don't burn the whole roster on it.
+            if "ENABLE_AUTO_BUY" in err:
+                return result
+
+            log_system_event(
+                "orchestrator_advance_next_org", "warning", org_id,
+                f"Truck event {event_id}: attempt {attempts_made} failed for "
+                f"{org_name} ({status}: {err[:200]}) — advancing to next org in roster")
+            logger.warning(f"Attempt {attempts_made} FAILED for org #{org_id} {org_name} "
+                           f"({status}) — advancing to next org in roster")
+
+            if attempts_made >= max_attempts:
+                note = (f"Gave up after {max_attempts} failed attempts "
+                        f"(orgs tried: {tried_org_ids})")
+                logger.error(note)
+                log_system_event("orchestrator_max_attempts", "error", org_id,
+                                 f"Truck event {event_id}: {note}")
+                update_truck_status(event_id, "missed", org_id, notes=note)
+                return result
 
 
 def alert_only_timer(event_id: int, org_id: int):
