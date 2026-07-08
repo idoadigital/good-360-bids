@@ -3970,3 +3970,13 @@ html.motion-ready .panel .is-revealed {
 .order-actions { display: inline-flex; gap: 3px; opacity: 0; transition: opacity .15s; }
 tr:hover .order-actions { opacity: 1; }
 .order-actions .btn { padding: 1px 7px; line-height: 1.4; }
+
+/* Telegram channel registry (Settings → Telegram Channels, 2026-07) */
+.tg-channels-hint {
+    margin: 0;
+    padding: 10px var(--space-3);
+    border-bottom: 1px solid var(--border);
+    color: var(--text-mute);
+    font-size: 12px;
+}
+#tgChannelsTable .actions button { margin-left: 4px; }

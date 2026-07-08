@@ -34,25 +34,7 @@ import re
 import traceback
 from datetime import datetime, timezone
 
-import requests
-
 from db import get_conn
-
-
-def _notifications_enabled() -> bool:
-    """ENABLE_NOTIFICATIONS env master switch (false in staging/feature).
-    feature_flags lives in the repo root — one level above this package."""
-    try:
-        import os.path
-        import sys
-        _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if _root not in sys.path:
-            sys.path.insert(0, _root)
-        import feature_flags
-        return feature_flags.notifications_enabled()
-    except Exception:
-        return os.environ.get("ENABLE_NOTIFICATIONS", "true").strip().lower() not in (
-            "false", "0", "no", "off")
 
 
 SWEEP_STATE_KEY = "last_readiness_sweep_at"
@@ -260,7 +242,9 @@ def record_flags(customer_id: str, result: dict, meta: list[dict] | None = None)
 
 
 def _alert_operator(rec: dict, result: dict, new_blockers: list[str]) -> None:
-    """Telegram the operator about a newly-incomplete customer. Best-effort."""
+    """Telegram about a newly-incomplete customer — routed to the customer's
+    NGO channel when one exists (org_key = QuickBeed customer id), otherwise
+    the admin channels. Best-effort; the router never raises."""
     profile = rec.get("profile") or {}
     name = profile.get("organization_name") or profile.get("full_name") or rec.get("id") or "?"
     lines = "\n".join(f"  • {html.escape(b)}" for b in result["blockers"])
@@ -270,37 +254,22 @@ def _alert_operator(rec: dict, result: dict, new_blockers: list[str]) -> None:
         f"Blockers:\n{lines}\n"
         f"Fix the record in QuickBeed — the flag clears automatically on the next check."
     )
-    delivered, err = False, None
-    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-    chat = (os.environ.get("TELEGRAM_OPERATOR_CHAT_ID") or "").strip()
-    if not _notifications_enabled():
-        token = chat = ""  # fall through so the skip is still recorded below
-    if token and chat:
-        try:
-            resp = requests.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat, "text": msg, "parse_mode": "HTML",
-                      "disable_web_page_preview": True},
-                timeout=10,
-            )
-            delivered = bool(resp.json().get("ok"))
-            if not delivered:
-                err = resp.text[:200]
-        except Exception as exc:  # noqa: BLE001
-            err = f"{type(exc).__name__}: {exc}"
-    else:
-        err = "TELEGRAM_BOT_TOKEN / TELEGRAM_OPERATOR_CHAT_ID not configured"
-    print(f"[readiness] customer {rec.get('id')} flagged: {result['blockers']} "
-          f"(telegram delivered={delivered}{' err=' + err if err else ''})")
+    delivered = False
     try:
-        import notifications_log
-        notifications_log.record_telegram(
-            source="customer_readiness", message=msg, delivered=delivered,
-            error=err, channel="operator", level="warning",
-            title=f"Customer data incomplete: {name}",
-        )
+        import os.path
+        import sys
+        _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if _root not in sys.path:
+            sys.path.insert(0, _root)
+        import telegram_router
+        delivered = telegram_router.send(
+            telegram_router.NGO, msg, org_key=str(rec.get("id") or "") or None,
+            source="customer_readiness", level="warning",
+            title=f"Customer data incomplete: {name}")
     except Exception:  # noqa: BLE001
         pass
+    print(f"[readiness] customer {rec.get('id')} flagged: {result['blockers']} "
+          f"(telegram delivered={delivered})")
 
 
 def validate_and_flag(rec: dict, *, alert: bool = True) -> dict:

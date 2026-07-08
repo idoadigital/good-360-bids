@@ -5,7 +5,6 @@ import os
 from datetime import datetime
 
 import pytz
-import requests
 
 import sys as _sys
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -42,37 +41,28 @@ ALERT_LOG = f'{WORKDIR}/good360_watchdog_alerts.log'
 MAX_STALE_MINUTES = 5
 ET = pytz.timezone('America/New_York')
 
-# Telegram config (values from .env — see .env.example)
-BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
-CHAT_ID = os.environ.get('TELEGRAM_GROUP_HOPE4HUMANITY', '')
-
 def log_alert(msg):
     with open(ALERT_LOG, 'a') as f:
         f.write(f"[{datetime.now(ET).strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
 
 def send_telegram_alert(message):
+    """Monitor-down/recovered alerts — admin channels via the router.
+    (Previously mislabeled 'operator' but sent to an org group.)"""
     if not feature_flags.notifications_enabled():
         print(feature_flags.notifications_blocked_msg("telegram"))
         return
     message = sandbox.decorate_alert(message)
-    delivered = False
-    err = None
     try:
-        url = f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage'
-        data = {'chat_id': CHAT_ID, 'text': message, 'parse_mode': 'HTML'}
-        r = requests.post(url, json=data, timeout=10)
-        delivered = (r.status_code == 200)
-        log_alert(f"Telegram sent: {r.status_code}")
-        print("[WATCHDOG] ✅ Telegram alert sent")
+        import telegram_router
+        if telegram_router.send(telegram_router.ADMIN, message, source='watchdog'):
+            log_alert("Telegram sent")
+            print("[WATCHDOG] ✅ Telegram alert sent")
+        else:
+            log_alert("Telegram not delivered (see notifications log)")
+            print("[WATCHDOG] ❌ Telegram not delivered")
     except Exception as e:
-        err = str(e)
         log_alert(f"Telegram FAILED: {e}")
         print(f"[WATCHDOG] ❌ Telegram failed: {e}")
-    try:
-        from notifications_log import record_telegram
-        record_telegram(source='watchdog', message=message, delivered=delivered, error=err, channel='operator')
-    except Exception:
-        pass
 
 def load_state():
     try:

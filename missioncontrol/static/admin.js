@@ -2579,6 +2579,8 @@ async function loadSettings() {
         }
         root.appendChild(div);
     }
+
+    loadTelegramChannels();
 }
 
 function renderScanCadenceRow(row, k, meta, isSuper) {
@@ -2691,6 +2693,192 @@ async function saveSettings() {
 
 document.getElementById('saveSettingsBtn')?.addEventListener('click', saveSettings);
 document.getElementById('saveSettingsBtnBottom')?.addEventListener('click', saveSettings);
+
+// ---------------- Telegram channels (telegram_router registry) ----------------
+//
+// Routing recap (mirrors telegram_router.py): Admin = operator-only errors/
+// incidents; General = availability alerts (falls back to Admin); NGO = one
+// customer's channel (org matched by org_key/org_id, falls back to Admin);
+// Group = opt-in broadcasts, never automatic. No all-orgs fan-out exists.
+
+const TG_CAT_PILL = { admin: 'err', general: 'ok', ngo: 'warn', group: 'idle' };
+let _tgCustomerNames = {};   // customer id -> org name, for the Org column
+
+async function loadTelegramChannels() {
+    const card = $('#tgChannelsCard');
+    if (!card) return;
+    if (CURRENT_USER.role !== 'super_admin') return; // card is super-only anyway
+    let channels = [];
+    try {
+        const j = await api('/api/admin/telegram-channels').then(r => r.json());
+        channels = j.data || [];
+    } catch (e) {
+        console.error('[telegram-channels] load failed', e);
+        return;
+    }
+    // Resolve org names for NGO rows (org_key may hold a customer id).
+    try {
+        const cj = await api('/api/admin/customers').then(r => r.json());
+        _tgCustomerNames = {};
+        for (const c of (cj.data || [])) _tgCustomerNames[c.id] = c.organization_name || c.id;
+    } catch { /* Org column falls back to the raw key */ }
+
+    $('#tgChannelCount').textContent = `${channels.length} channel${channels.length === 1 ? '' : 's'}`;
+    const tb = $('#tgChannelsTable tbody');
+    tb.innerHTML = '';
+    if (!channels.length) {
+        tb.innerHTML = `<tr><td colspan="6"><div class="empty-state">No channels yet — sends fall back to the legacy operator chat from env.</div></td></tr>`;
+        return;
+    }
+    for (const ch of channels) {
+        const orgLabel = ch.category === 'ngo'
+            ? escape(_tgCustomerNames[ch.org_key] || ch.org_key || (ch.org_id != null ? `#${ch.org_id}` : '—'))
+            : '—';
+        const status = ch.enabled
+            ? (ch.last_error
+                ? `<span class="pill err" title="${escape(ch.last_error)}">send failed</span>`
+                : (ch.last_sent_at
+                    ? `<span class="pill ok" title="last sent ${escape(ch.last_sent_at)} UTC">ok</span>`
+                    : `<span class="pill idle">never sent</span>`))
+            : `<span class="pill idle">disabled</span>`;
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td data-label="Title">${escape(ch.title)}</td>
+            <td data-label="Category"><span class="pill ${TG_CAT_PILL[ch.category] || 'idle'}">${escape(ch.category)}</span></td>
+            <td class="mono" data-label="Chat ID">${escape(ch.chat_id)}</td>
+            <td data-label="Org">${orgLabel}</td>
+            <td data-label="Status">${status}</td>
+            <td class="actions" data-label="">
+                <button data-act="test" data-id="${ch.id}">test</button>
+                <button data-act="edit" data-id="${ch.id}">edit</button>
+                <button data-act="toggle" data-id="${ch.id}">${ch.enabled ? 'disable' : 'enable'}</button>
+                <button data-act="del" data-id="${ch.id}">delete</button>
+            </td>`;
+        tb.appendChild(tr);
+    }
+    tb.querySelectorAll('button[data-act]').forEach(b => b.addEventListener('click', () => {
+        const ch = channels.find(c => String(c.id) === b.dataset.id);
+        if (!ch) return;
+        if (b.dataset.act === 'test') tgTestChannel(ch, b);
+        else if (b.dataset.act === 'edit') tgOpenChannelModal(ch);
+        else if (b.dataset.act === 'toggle') tgToggleChannel(ch);
+        else if (b.dataset.act === 'del') tgDeleteChannel(ch);
+    }));
+}
+
+async function tgTestChannel(ch, btn) {
+    btn.disabled = true;
+    btn.textContent = '…';
+    try {
+        const j = await api(`/api/admin/telegram-channels/${ch.id}/test`, { method: 'POST' }).then(r => r.json());
+        alert(j.delivered
+            ? `Test ping delivered to '${ch.title}'.`
+            : `Test ping NOT delivered: ${j.error || 'unknown error'}`);
+    } catch (e) {
+        alert('Test failed: ' + (e?.message || e));
+    }
+    loadTelegramChannels();
+}
+
+async function tgToggleChannel(ch) {
+    const res = await api(`/api/admin/telegram-channels/${ch.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled: ch.enabled ? 0 : 1 }),
+    });
+    const j = await res.json();
+    if (!j.success) alert(j.error || 'update failed');
+    loadTelegramChannels();
+}
+
+async function tgDeleteChannel(ch) {
+    if (!confirm(`Delete channel '${ch.title}'? Messages routed here will fall back per category rules.`)) return;
+    const j = await api(`/api/admin/telegram-channels/${ch.id}`, { method: 'DELETE' }).then(r => r.json());
+    if (!j.success) alert(j.error || 'delete failed');
+    loadTelegramChannels();
+}
+
+async function tgOpenChannelModal(ch) {
+    const modal = $('#tgChannelModal');
+    const form = modal.querySelector('form');
+    form.reset();
+    form.dataset.cid = ch ? ch.id : '';
+    // Remember the original org selection so an untouched edit doesn't
+    // clobber a seeded row's org_id/org_key pairing.
+    form.dataset.orgcur = ch ? (ch.org_key || (ch.org_id != null ? String(ch.org_id) : '')) : '';
+    $('#tgChannelModalTitle').textContent = ch ? `Edit channel '${ch.title}'` : 'Add Telegram channel';
+    $('#tgChannelErr').textContent = '';
+    if (ch) {
+        form.chat_id.value = ch.chat_id;
+        form.title.value = ch.title;
+        form.category.value = ch.category;
+    }
+    await tgFillOrgOptions(form.dataset.orgcur);
+    tgSyncOrgRow(form);
+    modal.hidden = false;
+}
+
+async function tgFillOrgOptions(current) {
+    const sel = $('#tgChannelModal form').elements.org_key;
+    sel.innerHTML = '';
+    let customers = [];
+    try {
+        const j = await api('/api/admin/customers').then(r => r.json());
+        customers = j.data || [];
+    } catch { /* dropdown still gets the current value below */ }
+    for (const c of customers) {
+        const o = document.createElement('option');
+        o.value = c.id;
+        o.textContent = c.organization_name || c.id;
+        sel.appendChild(o);
+    }
+    if (current && ![...sel.options].some(o => o.value === current)) {
+        const o = document.createElement('option');
+        o.value = current;
+        o.textContent = `${current} (current)`;
+        sel.appendChild(o);
+    }
+    if (current) sel.value = current;
+}
+
+function tgSyncOrgRow(form) {
+    $('#tgOrgRow').hidden = form.elements.category.value !== 'ngo';
+}
+
+$('#tgAddChannelBtn')?.addEventListener('click', () => tgOpenChannelModal(null));
+$('#tgChannelModal form').elements.category.addEventListener('change',
+    (ev) => tgSyncOrgRow(ev.target.form));
+$$('#tgChannelModal [data-close]').forEach(b => b.addEventListener('click', () => {
+    $('#tgChannelModal').hidden = true;
+}));
+$('#tgChannelModal form').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const f = ev.target;
+    const payload = {
+        chat_id: f.elements.chat_id.value.trim(),
+        title: f.elements.title.value.trim(),
+        category: f.elements.category.value,
+    };
+    if (f.elements.category.value === 'ngo') {
+        const selected = f.elements.org_key.value || '';
+        if (!f.dataset.cid || selected !== f.dataset.orgcur) {
+            // New channel, or org changed on edit: org_key carries the
+            // selection; clear org_id so the old pairing can't linger.
+            payload.org_key = selected || null;
+            payload.org_id = null;
+        }
+    } else if (!f.dataset.cid) {
+        payload.org_key = null;
+        payload.org_id = null;
+    }
+    const res = await api(
+        f.dataset.cid ? `/api/admin/telegram-channels/${f.dataset.cid}` : '/api/admin/telegram-channels',
+        { method: f.dataset.cid ? 'PATCH' : 'POST', body: JSON.stringify(payload) });
+    const j = await res.json();
+    if (!j.success) { $('#tgChannelErr').textContent = j.error || 'failed'; return; }
+    $('#tgChannelModal').hidden = true;
+    f.reset();
+    loadTelegramChannels();
+});
 
 // ---------------- Sandbox toggle ----------------
 //

@@ -1048,41 +1048,25 @@ def _live_purchase_approval_blocker(org_id: int) -> str | None:
                 "refusing to purchase (fail-closed)")
 
 
-def _alert_blocked_purchase(org_name: str, truck_title: str, reason: str) -> None:
-    """Telegram the operator that the approval gate refused a purchase.
-    A trip of this gate means an upstream selection bug — it must be loud."""
+def _alert_blocked_purchase(org_name: str, truck_title: str, reason: str,
+                            org_id: int | None = None,
+                            org_key: str | None = None) -> None:
+    """Telegram that the approval gate refused a purchase — routed to the
+    org's NGO channel (router falls back to the admin channels when the org
+    has none). A trip of this gate means an upstream selection bug — it
+    must be loud. Best-effort delivery; the router never raises."""
     import html as _html
-    import requests as _requests
-    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-    chat = (os.environ.get("TELEGRAM_OPERATOR_CHAT_ID") or "").strip()
-    try:
-        import feature_flags  # repo root is on sys.path (see module top)
-        _notif_on = feature_flags.notifications_enabled()
-    except ImportError:  # stale image/mount combo — env-only fallback
-        _notif_on = os.environ.get("ENABLE_NOTIFICATIONS", "true").strip().lower() not in (
-            "false", "0", "no", "off")
-    if not _notif_on:
-        token = chat = ""  # skip send; notifications_log still records it
     msg = ("🚫 <b>PURCHASE BLOCKED — approval gate</b>\n"
            f"Org: <b>{_html.escape(str(org_name))}</b>\n"
            f"Truck: {_html.escape(str(truck_title))}\n"
            f"Reason: {_html.escape(str(reason))}\n"
            "The purchase engine refused to buy for a customer the dashboard "
            "does not approve. Investigate how this org was selected.")
-    if token and chat:
-        try:
-            _requests.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat, "text": msg, "parse_mode": "HTML",
-                      "disable_web_page_preview": True},
-                timeout=10)
-        except Exception:  # noqa: BLE001
-            pass
     try:
-        import notifications_log
-        notifications_log.record_telegram(
-            source="autobuy_approval_gate", message=msg, delivered=bool(token and chat),
-            channel="operator", level="error",
+        import telegram_router  # repo root is on sys.path (see module top)
+        telegram_router.send(
+            telegram_router.NGO, msg, org_id=org_id, org_key=org_key,
+            source="autobuy_approval_gate", level="error",
             title=f"Purchase blocked: {org_name}")
     except Exception:  # noqa: BLE001
         pass
@@ -1132,43 +1116,27 @@ def _sync_cooldown_to_dashboard(org_id: int, cooldown_until_iso: str) -> None:
                      "roster cooldown is still in effect")
 
 
-def _alert_payment_failure(org_name: str, truck_title: str, error: str) -> None:
+def _alert_payment_failure(org_name: str, truck_title: str, error: str,
+                           org_id: int | None = None,
+                           org_key: str | None = None) -> None:
     """STRICT CARD GUARDRAIL companion (operator directive 2026-06-12):
-    when a live payment fails, the operator gets the processor's error
-    message verbatim. The transaction is failed and left alone — no card
-    substitution, no payment-data modification. Best-effort delivery."""
+    when a live payment fails, the processor's error message goes out
+    verbatim — routed to the org's NGO channel, falling back to the admin
+    channels when the org has none. The transaction is failed and left
+    alone — no card substitution, no payment-data modification.
+    Best-effort delivery; the router never raises."""
     import html as _html
-    import requests as _requests
-    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-    chat = (os.environ.get("TELEGRAM_OPERATOR_CHAT_ID") or "").strip()
-    try:
-        import feature_flags  # repo root is on sys.path (see module top)
-        _notif_on = feature_flags.notifications_enabled()
-    except ImportError:  # stale image/mount combo — env-only fallback
-        _notif_on = os.environ.get("ENABLE_NOTIFICATIONS", "true").strip().lower() not in (
-            "false", "0", "no", "off")
-    if not _notif_on:
-        token = chat = ""  # skip send; notifications_log still records it
     msg = ("💳 <b>PAYMENT FAILED — transaction stopped</b>\n"
            f"Org: <b>{_html.escape(str(org_name))}</b>\n"
            f"Truck: {_html.escape(str(truck_title))}\n"
            f"Processor: {_html.escape(str(error)[:500])}\n"
            "Per the card guardrail, no other card was tried and no payment "
            "data was modified. Fix the card in QuickBeed, then re-arm.")
-    if token and chat:
-        try:
-            _requests.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat, "text": msg, "parse_mode": "HTML",
-                      "disable_web_page_preview": True},
-                timeout=10)
-        except Exception:  # noqa: BLE001
-            pass
     try:
-        import notifications_log
-        notifications_log.record_telegram(
-            source="autobuy_payment_failure", message=msg,
-            delivered=bool(token and chat), channel="operator", level="error",
+        import telegram_router  # repo root is on sys.path (see module top)
+        telegram_router.send(
+            telegram_router.NGO, msg, org_id=org_id, org_key=org_key,
+            source="autobuy_payment_failure", level="error",
             title=f"Payment failed: {org_name}")
     except Exception:  # noqa: BLE001
         pass
@@ -1264,7 +1232,8 @@ def attempt_purchase(org_id: int, truck_event_id: int,
         if blocker:
             msg = f"PURCHASE BLOCKED by approval gate: {blocker}"
             logger.error(f"{msg} — org_id={org_id}, truck={truck.truck_title!r}")
-            _alert_blocked_purchase(org.org_name, truck.truck_title, blocker)
+            _alert_blocked_purchase(org.org_name, truck.truck_title, blocker,
+                                    org_id=org.org_id, org_key=org.org_uuid)
             return CheckoutResult(success=False, status="failed_checkout",
                                   mode="auto_buy", error_message=msg)
 
@@ -1413,7 +1382,8 @@ def attempt_purchase(org_id: int, truck_event_id: int,
                  else "All payment methods failed (no payment methods attempted)")
     update_purchase_attempt(attempt_id, "failed_payment", error_message=final_err)
     if not test_mode:
-        _alert_payment_failure(org.org_name, truck.truck_title, final_err)
+        _alert_payment_failure(org.org_name, truck.truck_title, final_err,
+                               org_id=org.org_id, org_key=org.org_uuid)
 
     with get_db_connection() as conn:
         conn.execute(

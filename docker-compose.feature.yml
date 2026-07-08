@@ -46,6 +46,7 @@ services:
       - ./good360_devtools_agent.py:/app/good360_devtools_agent.py:ro
       - ./good360_roster/good360_autobuy_v2.py:/app/good360_roster/good360_autobuy_v2.py:ro
       - ./notifications_log.py:/app/notifications_log.py:ro
+      - ./telegram_router.py:/app/telegram_router.py:ro
       - ./sandbox.py:/app/sandbox.py:ro
       - ./audit_log.py:/app/audit_log.py:ro
       - ./purchase_lock.py:/app/purchase_lock.py:ro
@@ -116,6 +117,7 @@ services:
       - ./missioncontrol:/app/missioncontrol:ro
       - ./good360_devtools_agent.py:/app/good360_devtools_agent.py:ro
       - ./notifications_log.py:/app/notifications_log.py:ro
+      - ./telegram_router.py:/app/telegram_router.py:ro
       - ./settings_bootstrap.py:/app/settings_bootstrap.py:ro
       - ./tls:/app/tls:ro
       # Settings writer mutates this env's own .env (never prod's).

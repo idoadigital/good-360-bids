@@ -209,17 +209,18 @@ def _release_lock() -> None:
 
 
 def _alert_operator(text: str) -> None:
-    """Best-effort Telegram to the operator chat."""
+    """Best-effort Telegram to the admin channels (session-expiry etc. are
+    operator-actionable ops issues, not customer messages)."""
     if not _notifications_enabled():
         return
-    import requests
-    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-    chat = (os.environ.get("TELEGRAM_OPERATOR_CHAT_ID") or "").strip()
-    if not (token and chat):
-        return
     try:
-        requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                      json={"chat_id": chat, "text": text}, timeout=10)
+        import sys
+        _root = str(Path(__file__).resolve().parent.parent)
+        if _root not in sys.path:
+            sys.path.insert(0, _root)
+        import telegram_router
+        telegram_router.send(telegram_router.ADMIN, text,
+                             source="order_verifier", parse_mode=None)
     except Exception:  # noqa: BLE001
         pass
 

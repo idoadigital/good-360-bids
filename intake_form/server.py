@@ -10,7 +10,6 @@ from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-import requests
 from flask import Flask, jsonify, request, send_from_directory
 
 # feature_flags lives in the repo root (one level up from this script's dir).
@@ -43,10 +42,9 @@ app = Flask(__name__, static_folder='.')
 FORM_DATA_DIR = f"{os.environ.get('WORKDIR', '/a0/usr/workdir')}/intake_form/submissions"
 os.makedirs(FORM_DATA_DIR, exist_ok=True)
 
-# Telegram & Email config (values from .env — see .env.example)
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_OPERATOR_CHAT_ID', '')
-
+# Email config (values from .env — see .env.example). Telegram goes through
+# telegram_router, which degrades to TELEGRAM_OPERATOR_CHAT_ID from env when
+# this container can't reach dashboard.db.
 SMTP_SERVER = os.environ.get('SMTP_HOST', 'smtp.gmail.com')
 SMTP_PORT = int(os.environ.get('SMTP_PORT', '587'))
 SENDER_EMAIL = os.environ.get('ALERT_EMAIL_FROM', '')
@@ -157,15 +155,16 @@ def send_telegram(data):
 📋 To approve: `/approve {ref_id}`
 ❌ To reject: `/reject {ref_id}`"""
 
-        resp = requests.post(
-            f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage',
-            json={'chat_id': TELEGRAM_CHAT_ID, 'text': msg, 'parse_mode': 'Markdown'},
-            timeout=10
-        )
-        if resp.json().get('ok'):
+        # New-customer PII → NGO category keyed by an org slug. No channel
+        # will exist for a brand-new org, so the router delivers this to the
+        # admin channels — never to another customer's group.
+        import telegram_router
+        org_slug = ''.join(ch if ch.isalnum() else '_' for ch in str(org_name).strip().lower()) or None
+        if telegram_router.send(telegram_router.NGO, msg, org_key=org_slug,
+                                source='intake', parse_mode='Markdown'):
             print(f'✓ Telegram sent: {ref_id}')
         else:
-            print(f'✗ Telegram failed: {resp.json()}')
+            print(f'✗ Telegram not delivered: {ref_id} (see notifications log)')
     except Exception as e:
         print(f'✗ Telegram error: {e}')
 

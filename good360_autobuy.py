@@ -336,35 +336,23 @@ ANSWERS = {
     'pallet_jack': 'We have a loading dock and a pallet jack.'
 }
 
-# Telegram config (values from .env — see .env.example)
-import os as _os
-
-BOT_TOKEN = _os.environ.get('TELEGRAM_BOT_TOKEN', '')
-CHAT_ID = _os.environ.get('TELEGRAM_GROUP_HOPE4HUMANITY', '')
-
 def send_telegram(message):
-    """Send alert via Telegram"""
+    """Send alert via Telegram — routed to this org's NGO channel (this
+    legacy engine only ever buys for Hope 4 Humanity; the router falls back
+    to the admin channels if no matching NGO channel is configured)."""
     if not feature_flags.notifications_enabled():
         print(feature_flags.notifications_blocked_msg("telegram"))
         return
     message = sandbox.decorate_alert(message)
-    delivered = False
-    err = None
     try:
-        import requests
-        url = f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage'
-        data = {'chat_id': CHAT_ID, 'text': message, 'parse_mode': 'HTML'}
-        requests.post(url, json=data, timeout=10)
-        delivered = True
-        print("[ALERT] Telegram sent")
+        import telegram_router
+        if telegram_router.send(telegram_router.NGO, message,
+                                org_key='hope4humanity', source='autobuy'):
+            print("[ALERT] Telegram sent")
+        else:
+            print("[ALERT] Telegram not delivered (see notifications log)")
     except Exception as e:
-        err = str(e)
         print(f"[ALERT] Telegram failed: {e}")
-    try:
-        from notifications_log import record_telegram
-        record_telegram(source='autobuy', message=message, delivered=delivered, error=err, channel='org:hope4humanity')
-    except Exception:
-        pass
 
 def log_step(step_num, step_name, screenshot_dir, page):
     """Log step and take screenshot"""

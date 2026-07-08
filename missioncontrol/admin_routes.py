@@ -3001,6 +3001,163 @@ def admin_delete_notifications_bulk():
     return jsonify({"success": True, "deleted": deleted})
 
 
+# ============================================================
+# Telegram channel registry (telegram_router.py)
+# ============================================================
+
+_TG_CATEGORIES = ("admin", "general", "ngo", "group")
+
+
+def _telegram_router():
+    """Import the repo-root telegram_router module (one level above this
+    package — same reach-up as order_verifier's feature_flags shim)."""
+    import sys
+    _root = str(Path(__file__).resolve().parent.parent)
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
+    import telegram_router
+    return telegram_router
+
+
+@bp.route("/api/admin/telegram-channels", methods=["GET"])
+@auth.super_admin_required
+def list_telegram_channels():
+    with get_conn() as c:
+        rows = c.execute(
+            """SELECT id, chat_id, title, category, org_id, org_key, enabled,
+                      last_sent_at, last_error, created_at
+               FROM telegram_channels
+               ORDER BY category, title COLLATE NOCASE"""
+        ).fetchall()
+    return jsonify({"success": True, "data": [dict(r) for r in rows]})
+
+
+def _tg_channel_payload_error(chat_id, title, category, org_id, org_key):
+    """Shared POST/PATCH validation. Returns an error string or None."""
+    if not chat_id:
+        return "chat_id is required"
+    if not title:
+        return "title is required"
+    if category not in _TG_CATEGORIES:
+        return "category must be one of admin|general|ngo|group"
+    if category == "ngo" and org_id is None and not org_key:
+        return "ngo channels need org_id or org_key"
+    return None
+
+
+@bp.route("/api/admin/telegram-channels", methods=["POST"])
+@auth.super_admin_required
+def add_telegram_channel():
+    data = request.get_json(silent=True) or {}
+    chat_id = str(data.get("chat_id") or "").strip()
+    title = str(data.get("title") or "").strip()
+    category = str(data.get("category") or "").strip().lower()
+    org_key = str(data.get("org_key") or "").strip() or None
+    org_id = data.get("org_id")
+    if org_id in (None, ""):
+        org_id = None
+    else:
+        try:
+            org_id = int(org_id)
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "error": "org_id must be an integer"}), 400
+    err = _tg_channel_payload_error(chat_id, title, category, org_id, org_key)
+    if err:
+        return jsonify({"success": False, "error": err}), 400
+    with get_conn() as c:
+        cur = c.execute(
+            """INSERT INTO telegram_channels (chat_id, title, category, org_id, org_key)
+               VALUES (?, ?, ?, ?, ?)""",
+            (chat_id, title, category, org_id, org_key))
+        new_id = cur.lastrowid
+    auth.audit("telegram_channel.add", target=title,
+               detail=f"id={new_id} category={category} chat_id={chat_id}")
+    return jsonify({"success": True, "id": new_id})
+
+
+@bp.route("/api/admin/telegram-channels/<int:cid>", methods=["PATCH"])
+@auth.super_admin_required
+def edit_telegram_channel(cid: int):
+    data = request.get_json(silent=True) or {}
+    with get_conn() as c:
+        row = c.execute(
+            "SELECT * FROM telegram_channels WHERE id = ?", (cid,)).fetchone()
+        if not row:
+            return jsonify({"success": False, "error": "not found"}), 404
+        merged = dict(row)
+        if "chat_id" in data:
+            merged["chat_id"] = str(data.get("chat_id") or "").strip()
+        if "title" in data:
+            merged["title"] = str(data.get("title") or "").strip()
+        if "category" in data:
+            merged["category"] = str(data.get("category") or "").strip().lower()
+        if "org_key" in data:
+            merged["org_key"] = str(data.get("org_key") or "").strip() or None
+        if "org_id" in data:
+            org_id = data.get("org_id")
+            if org_id in (None, ""):
+                merged["org_id"] = None
+            else:
+                try:
+                    merged["org_id"] = int(org_id)
+                except (TypeError, ValueError):
+                    return jsonify({"success": False, "error": "org_id must be an integer"}), 400
+        if "enabled" in data:
+            merged["enabled"] = 1 if data.get("enabled") in (1, "1", True, "true") else 0
+        err = _tg_channel_payload_error(merged["chat_id"], merged["title"],
+                                        merged["category"], merged["org_id"],
+                                        merged["org_key"])
+        if err:
+            return jsonify({"success": False, "error": err}), 400
+        c.execute(
+            """UPDATE telegram_channels
+               SET chat_id = ?, title = ?, category = ?, org_id = ?,
+                   org_key = ?, enabled = ?
+               WHERE id = ?""",
+            (merged["chat_id"], merged["title"], merged["category"],
+             merged["org_id"], merged["org_key"], merged["enabled"], cid))
+    auth.audit("telegram_channel.edit", target=merged["title"],
+               detail=f"id={cid} fields={sorted(data.keys())}")
+    return jsonify({"success": True})
+
+
+@bp.route("/api/admin/telegram-channels/<int:cid>", methods=["DELETE"])
+@auth.super_admin_required
+def delete_telegram_channel(cid: int):
+    with get_conn() as c:
+        row = c.execute(
+            "SELECT title FROM telegram_channels WHERE id = ?", (cid,)).fetchone()
+        if not row:
+            return jsonify({"success": False, "error": "not found"}), 404
+        c.execute("DELETE FROM telegram_channels WHERE id = ?", (cid,))
+    auth.audit("telegram_channel.delete", target=row["title"], detail=f"id={cid}")
+    return jsonify({"success": True})
+
+
+@bp.route("/api/admin/telegram-channels/<int:cid>/test", methods=["POST"])
+@auth.super_admin_required
+def test_telegram_channel(cid: int):
+    """Operator-clicked test ping — the one deliberate real send. In
+    non-prod the router's ENABLE_NOTIFICATIONS gate still blocks it."""
+    with get_conn() as c:
+        row = c.execute(
+            "SELECT title, category FROM telegram_channels WHERE id = ?",
+            (cid,)).fetchone()
+    if not row:
+        return jsonify({"success": False, "error": "not found"}), 404
+    try:
+        router = _telegram_router()
+    except Exception as exc:
+        return jsonify({"success": False, "error": f"router unavailable: {exc}"}), 500
+    msg = (f"🔔 Test ping from Mission Control — channel "
+           f"'{row['title']}' ({row['category']})")
+    delivered, err = router.send_to_channel(cid, msg, source="admin-test")
+    auth.audit("telegram_channel.test", target=row["title"],
+               detail=f"id={cid} delivered={bool(delivered)}"
+                      + (f" error={err}" if err else ""))
+    return jsonify({"success": True, "delivered": bool(delivered), "error": err})
+
+
 def _safe_json(path: str):
     try:
         with open(path, encoding="utf-8") as f:

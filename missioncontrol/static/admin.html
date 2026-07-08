@@ -842,6 +842,59 @@
                         Save
                     </button>
                 </div>
+
+                <!-- Telegram channel registry (telegram_router.py). Routing:
+                     Admin = operator-only · General = availability alerts ·
+                     NGO = one customer's channel · Group = opt-in broadcasts. -->
+                <div class="surface-card super-only" id="tgChannelsCard">
+                    <div class="surface-card-head">
+                        <h2>Telegram Channels</h2>
+                        <span class="sub" id="tgChannelCount">—</span>
+                        <div class="panel-actions">
+                            <button id="tgAddChannelBtn" class="btn btn-primary">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+                                Add Channel
+                            </button>
+                        </div>
+                    </div>
+                    <div class="surface-card-body flush">
+                        <p class="tg-channels-hint">Customer messages with no NGO channel go to Admin. Nothing broadcasts to all groups.</p>
+                        <table class="data" id="tgChannelsTable">
+                            <thead><tr>
+                                <th>Title</th><th>Category</th><th>Chat ID</th><th>Org</th><th>Status</th><th></th>
+                            </tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="modal" id="tgChannelModal" hidden>
+                    <form class="modal-card">
+                        <h3 id="tgChannelModalTitle">Add Telegram channel</h3>
+                        <label>Chat ID
+                            <input name="chat_id" autocomplete="off" required placeholder="-100…">
+                        </label>
+                        <label>Title
+                            <input name="title" autocomplete="off" required>
+                        </label>
+                        <label>Category
+                            <select name="category">
+                                <option value="admin">Admin</option>
+                                <option value="general">General</option>
+                                <option value="ngo">NGO</option>
+                                <option value="group">Group</option>
+                            </select>
+                        </label>
+                        <label id="tgOrgRow" hidden>Org
+                            <select name="org_key"></select>
+                        </label>
+                        <p class="error" id="tgChannelErr"></p>
+                        <div class="modal-actions">
+                            <button type="button" data-close>Cancel</button>
+                            <button type="submit" class="btn-primary">Save</button>
+                        </div>
+                    </form>
+                </div>
             </section>
 
             <!-- ============ IMPORT (full page, reached from Settings or sidebar) ============ -->

@@ -31,7 +31,7 @@ import requests
 MAX_STALE_MINUTES = int(os.environ.get("DEADMAN_MAX_STALE_MINUTES", "10"))
 STATE_FILE = Path(os.environ.get("DEADMAN_STATE", "/tmp/deadman_state.json"))
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID = os.environ.get("TELEGRAM_OPERATOR_CHAT_ID", "") or os.environ.get("TELEGRAM_GROUP_HOPE4HUMANITY", "")
+CHAT_ID = os.environ.get("TELEGRAM_OPERATOR_CHAT_ID", "")
 
 
 def fetch_heartbeat() -> dict | None:
@@ -85,6 +85,19 @@ def save_state(state: dict) -> None:
 
 
 def send_alert(message: str) -> None:
+    """Admin alert via the channel router. On the independent probe host
+    dashboard.db is unreachable, so the router degrades to the legacy
+    TELEGRAM_OPERATOR_CHAT_ID env destination by itself. If even the router
+    module is missing (stripped-down probe deploy), fall back to a direct
+    operator-chat send — the dead-man's switch must fail loud, not silent."""
+    try:
+        import telegram_router
+    except ImportError:
+        telegram_router = None
+    if telegram_router is not None:
+        if not telegram_router.send(telegram_router.ADMIN, message, source='deadman'):
+            print(f"[DEADMAN] Telegram not delivered — message was: {message}", file=sys.stderr)
+        return
     delivered = False
     err = None
     if not (BOT_TOKEN and CHAT_ID):
@@ -103,7 +116,7 @@ def send_alert(message: str) -> None:
             print(f"[DEADMAN] Telegram send failed: {e}", file=sys.stderr)
     try:
         from notifications_log import record_telegram
-        record_telegram(source='deadman', message=message, delivered=delivered, error=err, channel='operator')
+        record_telegram(source='deadman', message=message, delivered=delivered, error=err, channel='admin')
     except Exception:
         pass
 

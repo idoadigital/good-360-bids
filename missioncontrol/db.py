@@ -264,6 +264,27 @@ CREATE TABLE IF NOT EXISTS legacy_purchase_attempts (
 );
 CREATE INDEX IF NOT EXISTS idx_legacy_pa_ts ON legacy_purchase_attempts(ts);
 
+-- ============================================================
+-- Telegram channel registry (telegram_router.py). Categories:
+-- admin = operator-only; general = availability alerts (no
+-- customer data); ngo = one customer's channel (org_id/org_key);
+-- group = explicit opt-in broadcasts. There is deliberately no
+-- all-orgs fan-out category.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS telegram_channels (
+    id           INTEGER PRIMARY KEY,
+    chat_id      TEXT NOT NULL,
+    title        TEXT NOT NULL,
+    category     TEXT NOT NULL CHECK(category IN ('admin','general','ngo','group')),
+    org_id       INTEGER,
+    org_key      TEXT,
+    enabled      INTEGER DEFAULT 1,
+    last_sent_at TEXT,
+    last_error   TEXT,
+    created_at   TEXT DEFAULT (datetime('now'))
+);
+
 -- AI-generated diagnosis for failed purchases. Keyed by (source, attempt_id)
 -- so a single attempt only ever incurs one Claude call. `model` is recorded
 -- for evolvability — when we switch models, regenerate where it'd help.
@@ -331,6 +352,52 @@ def _apply_migrations(c) -> None:
         except sqlite3.OperationalError:
             # Column already exists — that's the expected steady state.
             pass
+    _seed_telegram_channels(c)
+
+
+def _legacy_telegram_setting(c, key: str) -> str:
+    """Legacy chat-id value: env first (settings_bootstrap hydrates it),
+    then the encrypted settings table. Empty string when absent."""
+    val = (os.environ.get(key) or "").strip()
+    if val:
+        return val
+    try:
+        import secrets_store
+        row = c.execute(
+            "SELECT value_enc FROM settings WHERE key = ?", (key,)).fetchone()
+        if row:
+            return (secrets_store.decrypt(row["value_enc"]) or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _seed_telegram_channels(c) -> None:
+    """One-time seed for the telegram_channels registry: while the table is
+    empty, migrate the legacy env/settings chat IDs so routing keeps working
+    the moment the router ships. Idempotent — a non-empty table is left
+    completely alone (including operator deletions)."""
+    try:
+        row = c.execute("SELECT COUNT(*) AS n FROM telegram_channels").fetchone()
+        if row and int(row["n"]) > 0:
+            return
+        seeds = (
+            ("TELEGRAM_OPERATOR_CHAT_ID", "admin", "Operator (migrated)", None, None),
+            ("TELEGRAM_GROUP_HOPE4HUMANITY", "ngo", "Hope 4 Humanity (migrated)", 1, "hope4humanity"),
+            ("TELEGRAM_GROUP_REVIVING_HOMES", "ngo", "Reviving Homes (migrated)", 6, "reviving_homes"),
+        )
+        for key, category, title, org_id, org_key in seeds:
+            chat_id = _legacy_telegram_setting(c, key)
+            if not chat_id:
+                continue
+            c.execute(
+                """INSERT INTO telegram_channels
+                   (chat_id, title, category, org_id, org_key)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (chat_id, title, category, org_id, org_key))
+    except sqlite3.OperationalError:
+        # Table missing (schema not applied yet) — next init_db seeds it.
+        pass
 
 
 def has_any_user() -> bool:

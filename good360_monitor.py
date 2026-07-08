@@ -95,16 +95,11 @@ def _gmail_conn():
     server.starttls()
     return server
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-
-# Multi-org Telegram groups (values from .env)
-ORG_TELEGRAM_GROUPS = {
-    k: v for k, v in {
-        "hope4humanity": os.environ.get("TELEGRAM_GROUP_HOPE4HUMANITY", ""),
-        "reviving_homes": os.environ.get("TELEGRAM_GROUP_REVIVING_HOMES", ""),
-    }.items() if v
-}
-ALL_TELEGRAM_GROUPS = list(ORG_TELEGRAM_GROUPS.values())
+# All outbound Telegram goes through the channel router (dashboard-managed
+# registry in dashboard.db). The legacy fan-out to every org group is gone:
+# admin/general messages hit operator channels, customer-attributable
+# messages hit only that org's channel (falling back to admin).
+import telegram_router
 
 # ============================================================
 # MULTI-ORG CONFIGURATION
@@ -178,19 +173,6 @@ def _roster_result_to_action(result, truck_name: str) -> str:
             return f"DRY-RUN [roster]: would purchase via {org_label}"
         return f"AUTO-BUY {s.upper()} [roster] ({org_label})"
     return f"AUTO-BUY UNKNOWN [roster]: {result!r}"
-
-def get_all_org_telegram_groups():
-    """Get list of all org Telegram groups for alerts"""
-    orgs = load_orgs()
-    groups = []
-    for key, org in orgs.items():
-        gid = org.get("telegram_group") or org.get("telegram_group_id")
-        if gid:
-            groups.append(gid)
-    return groups
-
-# Legacy single-chat fallback (prefer ORG_TELEGRAM_GROUPS)
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_GROUP_HOPE4HUMANITY", "")
 
 TRACK_KEYWORDS = ["unsorted", "variety", "assorted"]
 EXCLUDE_KEYWORDS = ["softline", "soft line", "softlines"]
@@ -717,27 +699,10 @@ def send_error_alert(error_message):
         log_cron(f"Failed to send error alert email: {e}")
 
     tg_msg = sandbox.alert_prefix() + f"Good360 Monitor ERROR\n\nTime: {timestamp}\nError: {error_message}\n\nPlease check the script!\n- E-Comsetter Good360 Monitor"
-    delivered = False
-    err = None
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": tg_msg,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True
-        }
-        requests.post(url, json=payload, timeout=10)
-        delivered = True
+    if telegram_router.send(telegram_router.ADMIN, tg_msg, source='monitor', level='error'):
         log_cron("Error alert Telegram sent")
-    except Exception as e:
-        err = str(e)
-        log_cron(f"Failed to send error alert Telegram: {e}")
-    try:
-        from notifications_log import record_telegram
-        record_telegram(source='monitor', message=tg_msg, delivered=delivered, error=err, channel='operator', level='error')
-    except Exception:
-        pass
+    else:
+        log_cron("Failed to send error alert Telegram (see notifications log)")
 
 # ============================================================
 # PRE-FLIGHT VALIDATION
@@ -796,55 +761,18 @@ def is_autobuy_active():
     return True
 
 def send_telegram(message):
-    """Send Telegram message to ALL org groups (with operator-chat fallback).
+    """Operator/admin Telegram via the channel router.
 
-    The legacy config keyed groups per-org (TELEGRAM_GROUP_<ORG>), but those
-    env slots ship empty in fresh installs. When no org groups are set we
-    fall back to TELEGRAM_OPERATOR_CHAT_ID so alerts still go somewhere
-    rather than silently dropping to /dev/null."""
+    The legacy body fanned this out to ALL org groups + the operator chat —
+    which leaked one customer's data into other customers' chats. Customer-
+    attributable messages must now go through
+    telegram_router.send(telegram_router.NGO, ...) with the org; anything
+    left calling this helper is admin-facing."""
     if not feature_flags.notifications_enabled():
         print(feature_flags.notifications_blocked_msg("telegram"))
         return False
     message = sandbox.decorate_alert(message)
-    url = "https://api.telegram.org/bot" + TELEGRAM_TOKEN + "/sendMessage"
-    any_delivered = False
-    last_err = None
-
-    targets = list(ALL_TELEGRAM_GROUPS)
-    # The operator chat ALWAYS gets a copy — org groups alone meant the
-    # operator never saw truck detections in their own chat and assumed
-    # Telegram was broken (2026-06-12).
-    op = (os.environ.get("TELEGRAM_OPERATOR_CHAT_ID") or "").strip()
-    if op and op not in targets:
-        targets.append(op)
-    if not targets:
-        print("Telegram: no chat IDs configured (set TELEGRAM_GROUP_<ORG> or TELEGRAM_OPERATOR_CHAT_ID)")
-        return
-
-    for chat_id in targets:
-        try:
-            payload = {
-                "chat_id": chat_id,
-                "text": message,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True
-            }
-            response = requests.post(url, json=payload, timeout=10)
-            result = response.json()
-            if result.get("ok"):
-                any_delivered = True
-                print(f"Telegram alert sent to {chat_id}!")
-            else:
-                last_err = str(result)
-                print(f"Telegram error for {chat_id}: {result}")
-        except Exception as e:
-            last_err = str(e)
-            print(f"Telegram failed for {chat_id}: {e}")
-    try:
-        from notifications_log import record_telegram
-        record_telegram(source='monitor', message=message, delivered=any_delivered, error=last_err, channel='all-orgs')
-    except Exception:
-        pass
+    return telegram_router.send(telegram_router.ADMIN, message, source='monitor')
 
 def _fire_and_forget(label, fn, *args, **kwargs):
     """Run a notification call on a daemon thread so the autobuy loop isn't
@@ -902,65 +830,15 @@ style='background:#27ae60;color:white;padding:12px 24px;text-decoration:none;bor
 
 
 
-def load_all_orgs():
-    """Load all active org configs from intake_form/submissions or org JSON files"""
-    orgs = {}
-    # Load from org config files in workdir
-    org_files = [f for f in os.listdir(WORKDIR) if f.endswith("_config.json") and "good360" not in f and "checkout" not in f]
-    for fname in org_files:
-        try:
-            with open(os.path.join(WORKDIR, fname)) as f:
-                cfg = json.load(f)
-            if cfg.get("status") == "active":
-                key = fname.replace("_config.json", "")
-                orgs[key] = cfg
-        except Exception as e:
-            log_cron(f"Warning: Could not load {fname}: {e}")
-    return orgs
-
-def get_org_telegram_group(org_key):
-    """Get Telegram group for a specific org"""
-    orgs = load_all_orgs()
-    if org_key in orgs:
-        return orgs[org_key].get("telegram_group_id", ORG_TELEGRAM_GROUPS.get(org_key, TELEGRAM_CHAT_ID))
-    return ORG_TELEGRAM_GROUPS.get(org_key, TELEGRAM_CHAT_ID)
-
-def send_telegram_to_org(org_key, message):
-    """Send Telegram to specific org's group"""
-    if not feature_flags.notifications_enabled():
-        print(feature_flags.notifications_blocked_msg("telegram"))
-        return False
-    message = sandbox.decorate_alert(message)
-    chat_id = get_org_telegram_group(org_key)
-    delivered = False
-    err = None
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML", "disable_web_page_preview": True}
-        result = requests.post(url, json=payload, timeout=10).json()
-        if result.get("ok"):
-            delivered = True
-            log_cron(f"Telegram alert sent to {org_key} ({chat_id})!")
-        else:
-            err = str(result)
-            log_cron(f"Telegram error for {org_key} ({chat_id}): {result}")
-    except Exception as e:
-        err = str(e)
-        log_cron(f"Telegram failed for {org_key} ({chat_id}): {e}")
-    try:
-        from notifications_log import record_telegram
-        record_telegram(source='monitor', message=message, delivered=delivered, error=err, channel=f'org:{org_key}')
-    except Exception:
-        pass
-
 def send_telegram_alert(available_trucks, extra_note=""):
+    """Truck availability alert — GENERAL channels (no customer data)."""
     now = datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d %H:%M:%S")
     truck_list = "\n".join(["- " + t["name"] for t in available_trucks])
     extra = "\n" + extra_note if extra_note else ""
     message = sandbox.alert_prefix() + "ALERT: Amazon Truckload AVAILABLE!\n\n" + truck_list + extra + "\n\nOrder NOW: " + sandbox.good360_browse_url() + "\n\nDetected: " + now + "\n- E-Comsetter Good360 Monitor"
-    send_telegram(message)
+    telegram_router.send(telegram_router.GENERAL, sandbox.decorate_alert(message), source='monitor')
 
-def send_urgent_manual_alert(truck_name, admin_fee, truck_url):
+def send_urgent_manual_alert(truck_name, admin_fee, truck_url, org_key=None):
     if not feature_flags.notifications_enabled():
         print(feature_flags.notifications_blocked_msg("urgent-manual alert"))
         return False
@@ -994,7 +872,8 @@ def send_urgent_manual_alert(truck_name, admin_fee, truck_url):
         server.login(SMTP_USER, SMTP_PASS)
         server.sendmail(SMTP_USER, ALERT_TO, msg.as_string())
     tg_msg = "URGENT - MANUAL PURCHASE REQUIRED\n\nAdmin fee exceeds auto-pay limit!\n\nTruck: " + truck_name + "\nAdmin Fee: $" + str(admin_fee) + f"\nAuto-Pay Limit: ${MAX_AUTO_PAY:,.0f}\nDetected: " + now + "\n\nGO BUY MANUALLY NOW:\n" + truck_url + "\n\n- E-Comsetter Good360 Monitor"
-    send_telegram(tg_msg)
+    telegram_router.send(telegram_router.NGO, sandbox.decorate_alert(tg_msg),
+                         org_key=org_key, source='monitor', level='warn')
     print("URGENT manual alert sent - fee $" + str(admin_fee) + " exceeds limit")
 
 def _redact_sensitive_text(text, org_config=None):
@@ -1033,7 +912,7 @@ def _details_lines(details, org_config=None):
         lines.append((str(key).replace("_", " ").title(), str(value)))
     return lines
 
-def send_purchase_confirmation(truck_name, admin_fee, org_name=None, details=None, org_config=None):
+def send_purchase_confirmation(truck_name, admin_fee, org_name=None, details=None, org_config=None, org_key=None):
     if not feature_flags.notifications_enabled():
         print(feature_flags.notifications_blocked_msg("purchase-confirmation alert"))
         return False
@@ -1078,10 +957,11 @@ def send_purchase_confirmation(truck_name, admin_fee, org_name=None, details=Non
     for label, value in _details_lines(details or {}, org_config):
         detail_text += "\n" + label + ": " + value
     tg_msg = "AUTO-PURCHASE COMPLETE!\n\nTruck: " + truck_name + org_text + "\nAdmin Fee: $" + str(admin_fee) + "\nShip To: 1025 Progress Circle, Lawrenceville GA 30043\nPurchased At: " + now + detail_text + "\n\nCheck Good360 email for confirmation!\n- E-Comsetter Good360 Monitor"
-    send_telegram(tg_msg)
+    telegram_router.send(telegram_router.NGO, sandbox.decorate_alert(tg_msg),
+                         org_key=org_key, source='monitor', level='success')
     print("Purchase confirmation sent for: " + truck_name)
 
-def send_checkout_failure_alert(truck_name, truck_url, status, message, org_name=None, details=None, org_config=None):
+def send_checkout_failure_alert(truck_name, truck_url, status, message, org_name=None, details=None, org_config=None, org_key=None):
     if not feature_flags.notifications_enabled():
         print(feature_flags.notifications_blocked_msg("checkout-failure alert"))
         return False
@@ -1131,7 +1011,8 @@ def send_checkout_failure_alert(truck_name, truck_url, status, message, org_name
     for label, value in _details_lines(details or {}, org_config):
         detail_text += "\n" + label + ": " + value
     tg_msg = "AUTO-PURCHASE FAILED\n\nTruck: " + truck_name + org_text + "\nStatus: " + status + "\nReason: " + safe_message + "\nDetected: " + now + detail_text + "\n\nManual link:\n" + truck_url + "\n\n- E-Comsetter Good360 Monitor"
-    send_telegram(tg_msg)
+    telegram_router.send(telegram_router.NGO, sandbox.decorate_alert(tg_msg),
+                         org_key=org_key, source='monitor', level='error')
     print("Checkout failure alert sent for: " + truck_name)
 
 
@@ -1859,6 +1740,7 @@ def main():
                             org_name=org_name,
                             details=checkout_details,
                             org_config=matching_org,
+                            org_key=matching_org_key,
                         )
                         action_taken = f"AUTO-BUY SUCCESS ({org_name})"
                         log_cron(f"Auto-buy success for {truck_name} ({org_name})")
@@ -1877,7 +1759,8 @@ def main():
                         # the generic checkout-failure path.
                         m = re.search(r"\$([\d,]+(?:\.\d+)?)", msg or "")
                         total_val = float(m.group(1).replace(",", "")) if m else 0.0
-                        send_urgent_manual_alert(truck_name, total_val, truck_url)
+                        send_urgent_manual_alert(truck_name, total_val, truck_url,
+                                                 org_key=matching_org_key)
                         action_taken = f"MANUAL REQUIRED ({org_name}): {msg}"
                         log_cron(f"Manual purchase required for {truck_name} ({org_name}): {msg}")
                     elif status == "COOLDOWN":
@@ -1900,6 +1783,7 @@ def main():
                             org_name=org_name,
                             details=checkout_details,
                             org_config=matching_org,
+                            org_key=matching_org_key,
                         )
                         action_taken = f"BLOCKED ({org_name}) - ALERT SENT"
                         log_cron(f"DevTools agent blocked purchase for {truck_name} ({org_name}): {msg}")
@@ -1912,6 +1796,7 @@ def main():
                             org_name=org_name,
                             details=checkout_details,
                             org_config=matching_org,
+                            org_key=matching_org_key,
                         )
                         action_taken = f"AUTO-BUY FAILED ({org_name}, {status}) - ALERT SENT"
                         log_cron(f"Auto-buy failed for {truck_name} ({org_name}): {status} - {msg}")
